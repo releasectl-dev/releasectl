@@ -35,7 +35,7 @@ runs:
   steps:
     # Phase 3（署名バイナリの配布）までは、uses: に書いたタグのソースからビルドする。
     - name: Cache releasectl build
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           ~/.cargo/registry

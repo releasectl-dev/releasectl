@@ -21,12 +21,17 @@ fn row(a: &Action) -> String {
         (Some(c), Some(d)) => format!("{} → {}", cell(c), cell(d)),
         _ => cell(&a.detail),
     };
+    let target = if a.target.is_empty() {
+        "—".to_string()
+    } else {
+        format!("`{}`", cell(&a.target))
+    };
     format!(
-        "| {} | {} | `{}` | `{}` | {} |",
+        "| {} | {} | `{}` | {} | {} |",
         a.status.symbol(),
         a.provider,
         cell(&a.op),
-        cell(&a.target),
+        target,
         change
     )
 }
@@ -47,9 +52,28 @@ pub fn render(r: &RunReport) -> String {
         .map(|(s, n)| format!("{} {n}", s.as_str()))
         .collect();
     let notable: Vec<&Action> = r.actions.iter().filter(|a| is_notable(a)).collect();
+    // 鍵が無くて飛ばした provider（確認していないので「差分なし」とは言えない）
+    let skipped: Vec<&str> = r
+        .actions
+        .iter()
+        .filter(|a| a.op == "provider" && a.status == Status::Skip)
+        .map(|a| a.provider)
+        .collect();
+    let checked_any = r
+        .actions
+        .iter()
+        .any(|a| !(a.op == "provider" && a.status == Status::Skip));
 
+    if !skipped.is_empty() {
+        out.push_str(&format!(
+            "⚠️ **確認していない provider: {}**（鍵の env が無い。詳細は下の全件）\n\n",
+            skipped.join(", ")
+        ));
+    }
     if notable.is_empty() {
-        out.push_str("✅ **差分なし** — ストアは desired-state と一致しています。\n\n");
+        if checked_any {
+            out.push_str("✅ **差分なし** — ストアは desired-state と一致しています。\n\n");
+        }
     } else {
         let has_error = notable.iter().any(|a| a.status == Status::Error);
         out.push_str(if has_error { "❌ " } else { "📝 " });
@@ -117,6 +141,26 @@ mod tests {
         // 一致は表に出さない（畳んだ全件にだけ）
         let table = md.split("<details>").next().unwrap();
         assert!(!table.contains("`group`"));
+    }
+
+    #[test]
+    fn skipped_providers_are_not_called_clean() {
+        let mut r = Report::new("appstore");
+        r.add(
+            "provider",
+            "",
+            Status::Skip,
+            "ASC_KEY_ID / ASC_ISSUER_ID not set",
+        );
+        let md = render(&rep("plan", &r.actions));
+        assert!(md.contains("⚠️ **確認していない provider: appstore**"));
+        assert!(!md.contains("差分なし"));
+        assert!(md.contains("| - | appstore | `provider` | — |"));
+        // 片方だけ確認できたなら、差分なしと警告の両方
+        r.add("group", "Pro", Status::Exists, "");
+        let md = render(&rep("plan", &r.actions));
+        assert!(md.contains("確認していない provider: appstore"));
+        assert!(md.contains("差分なし"));
     }
 
     #[test]
