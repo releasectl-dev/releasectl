@@ -1,0 +1,17 @@
+[package]
+name = "releasectl-stores"
+description = "App Store Connect / Google Play の reconciler。鍵に触れるのはこの crate だけ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+releasectl-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+jsonwebtoken.workspace = true
+urlencoding.workspace = true
+base64.workspace = true

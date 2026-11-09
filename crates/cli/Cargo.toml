@@ -1,0 +1,16 @@
+[package]
+name = "releasectl"
+description = "releasectl CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "releasectl"
+path = "src/main.rs"
+
+[dependencies]
+releasectl-core.workspace = true
+releasectl-stores.workspace = true
+clap.workspace = true

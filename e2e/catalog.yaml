@@ -1,0 +1,68 @@
+# E2E 用のテストアプリ（dev.releasectl.e2e）のカタログ。審査に出さないアプリなので
+# apply を流してよい唯一の対象。鍵は含まない（env から読む）。
+#
+# 注意: App Store の productId は一度作ると消せず、再利用もできない。
+# 新しい商品を足すときは id を増やす（使い回さない）。
+appName: releasectl-e2e
+bundleId: dev.releasectl.e2e
+packageName: dev.releasectl.e2e
+
+# Go 版 iapctl が必須にしている RevenueCat 用のキー（パリティのためだけ。Rust 版は無視する）
+entitlement:
+  key: e2e
+
+pricing:
+  territory: USA
+  region: US
+  currency: USD
+
+products:
+  - key: monthly
+    appStoreId: dev.releasectl.e2e.monthly
+    playProductId: e2e_monthly
+    playBasePlanId: monthly
+    period: P1M
+    price: 1.99
+    localizations:
+      - locale: en-US
+        name: "E2E Monthly"
+        description: "releasectl e2e monthly subscription."
+      - locale: ja
+        name: "E2E 月額"
+        description: "releasectl の E2E 用の月額サブスク。"
+
+  - key: yearly
+    appStoreId: dev.releasectl.e2e.yearly
+    playProductId: e2e_yearly
+    playBasePlanId: yearly
+    period: P1Y
+    price: 19.99
+    localizations:
+      - locale: en-US
+        name: "E2E Yearly"
+        description: "releasectl e2e yearly subscription."
+
+  # 2026-11-09 追加: 新規サブスクで「販売地域 → 価格」の順が 1 回の apply で通るかの確認用
+  - key: weekly
+    appStoreId: dev.releasectl.e2e.weekly
+    playProductId: e2e_weekly
+    playBasePlanId: weekly
+    period: P1W
+    price: 0.99
+    localizations:
+      - locale: en-US
+        name: "E2E Weekly"
+        description: "releasectl e2e weekly subscription."
+
+  - key: lifetime
+    type: nonConsumable
+    appStoreId: dev.releasectl.e2e.lifetime
+    playProductId: e2e_lifetime
+    price: 29.99
+    localizations:
+      - locale: en-US
+        name: "E2E Lifetime"
+        description: "releasectl e2e one-time purchase."
+
+appstore:
+  subscriptionGroup: E2E Pro
