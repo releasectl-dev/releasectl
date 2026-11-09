@@ -14,3 +14,4 @@ path = "src/main.rs"
 releasectl-core.workspace = true
 releasectl-stores.workspace = true
 clap.workspace = true
+serde_json.workspace = true

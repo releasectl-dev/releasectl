@@ -360,27 +360,52 @@ impl AppStore {
             .iter()
             .find(|(_, cp)| price_eq(cp, p.price))
             .map(|(id, _)| id.clone());
-        let mut has_any = false;
-        let mut matches = false;
-        for pid in self.subscription_price_point_ids(sub_id) {
-            if !points.contains_key(&pid) {
-                continue; // 別テリトリの価格
+        let current_ids = match self.subscription_price_point_ids(sub_id) {
+            Ok(ids) => ids,
+            Err(e) => {
+                r.add("price", &p.app_store_id, Status::Error, e);
+                return;
             }
-            has_any = true;
-            if want_point.as_deref() == Some(pid.as_str()) {
-                matches = true;
-            }
-        }
-        if matches {
+        };
+        // 設定テリトリの価格だけを見る（別テリトリの価格は無視）。
+        let in_territory: Vec<&String> = current_ids
+            .iter()
+            .filter(|pid| points.contains_key(*pid))
+            .collect();
+        if in_territory
+            .iter()
+            .any(|pid| want_point.as_deref() == Some(pid.as_str()))
+        {
             r.add("price", &p.app_store_id, Status::Exists, "");
             return;
         }
-        let mut detail = format!("{} {}", self.cfg.pricing.currency, p.price_label());
-        if has_any {
-            detail.push_str(" (update)");
-        }
+        let currency = &self.cfg.pricing.currency;
+        let desired = format!("{currency} {}", p.price_label());
+        // そのテリトリに別の価格があればドリフト（現在値はその price-point の customerPrice）。
+        let current = in_territory
+            .first()
+            .map(|pid| format!("{currency} {}", points[*pid]));
+        let report = |r: &mut Report, done: bool| match &current {
+            Some(c) => r.add_diff(
+                "price",
+                &p.app_store_id,
+                if done { Status::Updated } else { Status::Drift },
+                c.clone(),
+                desired.clone(),
+            ),
+            None => r.add(
+                "price",
+                &p.app_store_id,
+                if done {
+                    Status::Created
+                } else {
+                    Status::Create
+                },
+                desired.clone(),
+            ),
+        };
         if !apply {
-            r.add("price", &p.app_store_id, Status::Create, detail);
+            report(r, false);
             return;
         }
         let Some(want_point) = want_point else {
@@ -405,7 +430,7 @@ impl AppStore {
         match self.cli.r#do("POST", "/v1/subscriptionPrices", Some(&body)) {
             Err(e) => r.add("price", &p.app_store_id, Status::Error, e),
             Ok(resp) if !resp.ok() => r.add("price", &p.app_store_id, Status::Error, resp.error()),
-            Ok(_) => r.add("price", &p.app_store_id, Status::Created, detail),
+            Ok(_) => report(r, true),
         }
     }
 
@@ -424,23 +449,20 @@ impl AppStore {
             .collect())
     }
 
-    /// サブスクが今付いている price-point の id（全テリトリ）。失敗したら空。
-    fn subscription_price_point_ids(&self, sub_id: &str) -> Vec<String> {
+    /// サブスクが今付いている price-point の id（全テリトリ）。
+    /// 読めなければエラー（「価格が無い」とはみなさない）。
+    fn subscription_price_point_ids(&self, sub_id: &str) -> Result<Vec<String>, String> {
         // include=subscriptionPricePoint を付けないと relationship の data.id が返らない。
-        let Ok(resp) = self.cli.r#do(
+        let resp = self.cli.r#do(
             "GET",
             &format!("/v1/subscriptions/{sub_id}/prices?include=subscriptionPricePoint&limit=200"),
             None,
-        ) else {
-            return Vec::new();
-        };
+        )?;
         if !resp.ok() {
-            return Vec::new();
+            return Err(format!("list subscription prices: {}", resp.error()));
         }
-        let Ok(v) = resp.json::<Value>() else {
-            return Vec::new();
-        };
-        v.get("data")
+        let v: Value = resp.json()?;
+        Ok(v.get("data")
             .and_then(Value::as_array)
             .map(|a| {
                 a.iter()
@@ -452,7 +474,7 @@ impl AppStore {
                     })
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
     /// ロケールごとに、無ければ作り、文言が違えば更新する（正は iap.yaml）。
@@ -476,23 +498,28 @@ impl AppStore {
                 "/v1/inAppPurchaseLocalizations",
             ),
         };
-        // 既存の id と今の文言（ロケールごと）。読めなければ全部「無い」として扱う（Go 版と同じ）。
-        let mut have: HashMap<String, (String, String, String)> = HashMap::new();
-        if let Ok(resp) = self.cli.r#do("GET", &list_path, None)
-            && resp.ok()
-            && let Ok((data, _)) = parse_list(&resp)
-        {
-            for loc in data {
-                have.insert(
+        // 既存の id と今の文言（ロケールごと）。読めなければエラーにして、書き込まない
+        // （Go 版は「無い」とみなして作成を送っていた）。
+        let data = match self.get_all(&list_path, "list localizations") {
+            Ok(d) => d,
+            Err(e) => {
+                r.add("localization", &p.app_store_id, Status::Error, e);
+                return;
+            }
+        };
+        let have: HashMap<String, (String, String, String)> = data
+            .into_iter()
+            .map(|loc| {
+                (
                     attr(&loc, "locale").to_string(),
                     (
                         loc.id.clone(),
                         attr(&loc, "name").to_string(),
                         attr(&loc, "description").to_string(),
                     ),
-                );
-            }
-        }
+                )
+            })
+            .collect();
         for loc in &p.localizations {
             let target = format!("{} [{}]", p.app_store_id, loc.locale);
             let cur = have.get(&loc.locale);
@@ -503,8 +530,22 @@ impl AppStore {
                 r.add("localization", &target, Status::Exists, "");
                 continue;
             }
+            // そのロケールがあれば、違う項目を挙げてドリフトとして報告する。
+            let (pending, done, detail) = match cur {
+                None => (Status::Create, Status::Created, String::new()),
+                Some((_, name, desc)) => {
+                    let mut d = Vec::new();
+                    if *name != loc.name {
+                        d.push("name");
+                    }
+                    if *desc != loc.description {
+                        d.push("description");
+                    }
+                    (Status::Drift, Status::Updated, d.join(", "))
+                }
+            };
             if !apply {
-                r.add("localization", &target, Status::Create, "");
+                r.add("localization", &target, pending, detail);
                 continue;
             }
             let mut attrs = json!({"name": loc.name});
@@ -539,7 +580,7 @@ impl AppStore {
                 Ok(resp) if !resp.ok() => {
                     r.add("localization", &target, Status::Error, resp.error())
                 }
-                Ok(_) => r.add("localization", &target, Status::Created, ""),
+                Ok(_) => r.add("localization", &target, done, detail),
             }
         }
     }
@@ -569,12 +610,29 @@ impl AppStore {
                 "/v1/inAppPurchaseAvailabilities",
             ),
         };
-        if let Ok(resp) = self.cli.r#do("GET", &get_path, None)
-            && resp.ok()
-            && created_id(&resp).is_some_and(|i| !i.is_empty())
-        {
-            r.add("availability", &p.app_store_id, Status::Exists, "");
-            return;
+        // 読めなければエラーにして、書き込まない（Go 版は「無い」とみなして作成を送っていた）。
+        // 404 か data が空なら「まだ無い」。
+        match self.cli.r#do("GET", &get_path, None) {
+            Err(e) => {
+                r.add("availability", &p.app_store_id, Status::Error, e);
+                return;
+            }
+            Ok(resp) if resp.status == 404 => {}
+            Ok(resp) if !resp.ok() => {
+                r.add(
+                    "availability",
+                    &p.app_store_id,
+                    Status::Error,
+                    format!("get availability: {}", resp.error()),
+                );
+                return;
+            }
+            Ok(resp) => {
+                if created_id(&resp).is_some_and(|i| !i.is_empty()) {
+                    r.add("availability", &p.app_store_id, Status::Exists, "");
+                    return;
+                }
+            }
         }
         let territory = self.cfg.pricing.territory.as_str();
         if !apply {
@@ -669,9 +727,20 @@ impl AppStore {
     }
 
     fn reconcile_iap_price(&self, apply: bool, iap_id: &str, p: &Product, r: &mut Report) {
-        let point_id = match self.find_iap_price_point(iap_id, p.price) {
-            Ok(Some(id)) => id,
-            Ok(None) => {
+        let points = match self.iap_price_points(iap_id) {
+            Ok(pts) => pts,
+            Err(e) => {
+                r.add("price", &p.app_store_id, Status::Error, e);
+                return;
+            }
+        };
+        let point_id = match points
+            .iter()
+            .find(|(_, cp)| price_eq(cp, p.price))
+            .map(|(id, _)| id.clone())
+        {
+            Some(id) => id,
+            None => {
                 r.add(
                     "price",
                     &p.app_store_id,
@@ -680,29 +749,60 @@ impl AppStore {
                 );
                 return;
             }
-            Err(e) => {
-                r.add("price", &p.app_store_id, Status::Error, e);
-                return;
-            }
         };
         // 設定テリトリをスケジュールの baseTerritory にし、他のテリトリはそこから自動換算させる。
         // base が設定テリトリで、その手動価格が希望の price-point なら一致。
         // （手動価格の id と price-point の id はどちらも {territory, tier} を base64 にしたものなので、
         //  不透明な id 文字列ではなく、デコードしたキーで比べる）
         let territory = self.cfg.pricing.territory.as_str();
-        let (base, manual) = self.read_iap_schedule(iap_id);
+        let (base, manual) = match self.read_iap_schedule(iap_id) {
+            Ok(s) => s,
+            Err(e) => {
+                r.add("price", &p.app_store_id, Status::Error, e);
+                return;
+            }
+        };
+        let current_key = manual.get(territory);
         if base == territory
-            && manual.get(territory).map(String::as_str) == iap_price_key(&point_id).as_deref()
+            && current_key.map(String::as_str) == iap_price_key(&point_id).as_deref()
         {
             r.add("price", &p.app_store_id, Status::Exists, "");
             return;
         }
-        let mut detail = format!("{} {}", self.cfg.pricing.currency, p.price_label());
-        if !base.is_empty() {
-            detail.push_str(" (update)");
-        }
+        let currency = &self.cfg.pricing.currency;
+        let desired = format!("{currency} {}", p.price_label());
+        // スケジュールがあればドリフト。現在値は、手動価格のキーに一致する price-point の customerPrice。
+        let current = (!base.is_empty()).then(|| {
+            current_key
+                .and_then(|k| {
+                    points
+                        .iter()
+                        .find(|(id, _)| iap_price_key(id).as_ref() == Some(k))
+                })
+                .map(|(_, cp)| format!("{currency} {cp}"))
+                .unwrap_or_else(|| format!("base {base}"))
+        });
+        let report = |r: &mut Report, done: bool| match &current {
+            Some(c) => r.add_diff(
+                "price",
+                &p.app_store_id,
+                if done { Status::Updated } else { Status::Drift },
+                c.clone(),
+                desired.clone(),
+            ),
+            None => r.add(
+                "price",
+                &p.app_store_id,
+                if done {
+                    Status::Created
+                } else {
+                    Status::Create
+                },
+                desired.clone(),
+            ),
+        };
         if !apply {
-            r.add("price", &p.app_store_id, Status::Create, detail);
+            report(r, false);
             return;
         }
         // 手動の価格スケジュール = スケジュール + そのテリトリの price-point を指す価格 1 つ。
@@ -732,29 +832,29 @@ impl AppStore {
         {
             Err(e) => r.add("price", &p.app_store_id, Status::Error, e),
             Ok(resp) if !resp.ok() => r.add("price", &p.app_store_id, Status::Error, resp.error()),
-            Ok(_) => r.add("price", &p.app_store_id, Status::Created, detail),
+            Ok(_) => report(r, true),
         }
     }
 
     /// 価格スケジュールの baseTerritory と、テリトリ → 価格キー（"territory|tier"）の手動価格。
     /// 手動価格の id に {territory, tier} が入っているので、1 件ずつ引かずにデコードする。
-    fn read_iap_schedule(&self, iap_id: &str) -> (String, HashMap<String, String>) {
+    /// スケジュールが無ければ（404）空。読めなければエラー。
+    fn read_iap_schedule(&self, iap_id: &str) -> Result<(String, HashMap<String, String>), String> {
         let mut manual = HashMap::new();
-        let Ok(resp) = self.cli.r#do(
+        let resp = self.cli.r#do(
             "GET",
             &format!(
                 "/v2/inAppPurchases/{iap_id}/iapPriceSchedule?include=manualPrices,baseTerritory"
             ),
             None,
-        ) else {
-            return (String::new(), manual);
-        };
-        if !resp.ok() {
-            return (String::new(), manual);
+        )?;
+        if resp.status == 404 {
+            return Ok((String::new(), manual));
         }
-        let Ok(v) = resp.json::<Value>() else {
-            return (String::new(), manual);
-        };
+        if !resp.ok() {
+            return Err(format!("get price schedule: {}", resp.error()));
+        }
+        let v: Value = resp.json()?;
         if let Some(mps) = v
             .pointer("/data/relationships/manualPrices/data")
             .and_then(Value::as_array)
@@ -774,30 +874,22 @@ impl AppStore {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        (base, manual)
+        Ok((base, manual))
     }
 
-    /// 設定テリトリで customerPrice が price に一致する price-point の id。
-    fn find_iap_price_point(&self, iap_id: &str, price: f64) -> Result<Option<String>, String> {
-        let mut path = format!(
-            "/v2/inAppPurchases/{iap_id}/pricePoints?filter[territory]={}&limit=8000",
-            self.cfg.pricing.territory
-        );
-        while !path.is_empty() {
-            let resp = self.cli.r#do("GET", &path, None)?;
-            if !resp.ok() {
-                return Err(format!("list iap price points: {}", resp.error()));
-            }
-            let (data, next) = parse_list(&resp)?;
-            if let Some(pp) = data
-                .iter()
-                .find(|pp| price_eq(attr(pp, "customerPrice"), price))
-            {
-                return Ok(Some(pp.id.clone()));
-            }
-            path = next;
-        }
-        Ok(None)
+    /// 設定テリトリの IAP の price-point（id, customerPrice）。
+    fn iap_price_points(&self, iap_id: &str) -> Result<Vec<(String, String)>, String> {
+        Ok(self
+            .get_all(
+                &format!(
+                    "/v2/inAppPurchases/{iap_id}/pricePoints?filter[territory]={}&limit=8000",
+                    self.cfg.pricing.territory
+                ),
+                "list iap price points",
+            )?
+            .into_iter()
+            .map(|pp| (pp.id.clone(), attr(&pp, "customerPrice").to_string()))
+            .collect())
     }
 }
 

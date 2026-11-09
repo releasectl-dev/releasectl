@@ -13,7 +13,7 @@ lint: ## fmt の差分なし + clippy -D warnings
 fmt:
 	cargo fmt
 
-## Go 版 iapctl との plan 出力の一致テスト（読み取り専用。本番のストアに流してよい）。
+## Go 版 iapctl との plan 出力の一致テスト（v0.1.0 のときだけ意味がある。読み取り専用）。
 ## GO_SRC / IAP_YAML / ENV_FILE を渡す。ワークスペースの `make parity` が sonir の値で呼ぶ。
 parity:
 	./parity/run.sh
@@ -23,8 +23,8 @@ parity:
 ENV_PATH = $(patsubst ~/%,$(HOME)/%,$(ENV_FILE))
 E2E_RUN = set -a; [ -n "$(ENV_PATH)" ] && . "$(ENV_PATH)"; set +a;
 
-e2e-plan: build ## テストアプリに plan
-	@$(E2E_RUN) cd $(dir $(ENV_PATH)). && $(CURDIR)/target/release/releasectl iap plan --config $(CURDIR)/e2e/catalog.yaml
+e2e-plan: build ## テストアプリに plan（差分なしで exit 0、差分ありで 2）
+	@$(E2E_RUN) cd $(dir $(ENV_PATH)). && $(CURDIR)/target/release/releasectl iap plan --config $(CURDIR)/e2e/catalog.yaml --detailed-exitcode
 
 e2e-apply: build ## テストアプリに apply（作った商品は消せない）
 	@$(E2E_RUN) cd $(dir $(ENV_PATH)). && $(CURDIR)/target/release/releasectl iap apply --config $(CURDIR)/e2e/catalog.yaml

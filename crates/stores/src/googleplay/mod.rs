@@ -242,6 +242,8 @@ impl Reconciler for Play {
                 }
             };
 
+            // 今回作ったなら、続く項目は「作った」、既存なら「直した」として報告する。
+            let just_created = sub.is_none();
             let sub = match sub {
                 Some(s) => {
                     r.add("subscription", pid, Status::Exists, "");
@@ -273,32 +275,32 @@ impl Reconciler for Play {
                     "base plan absent on existing subscription; patch not supported",
                 ),
                 "ACTIVE" => r.add("basePlan.activate", bpid, Status::Exists, ""),
-                state if !apply => r.add("basePlan.activate", bpid, Status::Create, state),
-                _ => match self.activate_base_plan(pkg, pid, bpid) {
-                    Ok(()) => r.add("basePlan.activate", bpid, Status::Created, ""),
+                // 既存のサブスクの base plan が ACTIVE でない = 販売停止中などのドリフト。
+                state if !apply => {
+                    r.add_diff("basePlan.activate", bpid, Status::Drift, state, "ACTIVE")
+                }
+                state => match self.activate_base_plan(pkg, pid, bpid) {
+                    Ok(()) if just_created => r.add("basePlan.activate", bpid, Status::Created, ""),
+                    Ok(()) => {
+                        r.add_diff("basePlan.activate", bpid, Status::Updated, state, "ACTIVE")
+                    }
                     Err(e) => r.add("basePlan.activate", bpid, Status::Error, e),
                 },
             }
 
             // 設定リージョンの base plan 価格が違えばその場で更新する（他リージョンは保つ）。
             if let Some((cu, cn)) = base_plan_price(&sub, bpid, region) {
+                let current = format!("{currency} {}", format_money(cu, cn));
+                let desired = format!("{currency} {}", prod.price_label());
                 if cu == prod.price_units() && cn == prod.price_nanos() {
                     r.add("basePlan.price", bpid, Status::Exists, "");
                 } else if !apply {
-                    r.add(
-                        "basePlan.price",
-                        bpid,
-                        Status::Create,
-                        format!("{currency} {}→{}", format_money(cu, cn), prod.price_label()),
-                    );
+                    r.add_diff("basePlan.price", bpid, Status::Drift, current, desired);
                 } else {
                     match self.update_base_plan_price(pkg, prod) {
-                        Ok(()) => r.add(
-                            "basePlan.price",
-                            bpid,
-                            Status::Created,
-                            format!("{currency} {}", prod.price_label()),
-                        ),
+                        Ok(()) => {
+                            r.add_diff("basePlan.price", bpid, Status::Updated, current, desired)
+                        }
                         Err(e) => r.add("basePlan.price", bpid, Status::Error, e),
                     }
                 }
@@ -340,9 +342,34 @@ impl Play {
             r.add("listing", pid, Status::Exists, "");
             return;
         }
-        let detail = format!("{} langs", want.len());
+        // 掲載が 1 つも無ければ作成、あれば違う言語を挙げてドリフトとして報告する。
+        let (pending, done, detail) = if cur.is_empty() {
+            (
+                Status::Create,
+                Status::Created,
+                format!("{} langs", want.len()),
+            )
+        } else {
+            let mut diffs: Vec<String> = want
+                .iter()
+                .filter_map(|(lc, w)| match cur.get(lc.as_str()) {
+                    None => Some(format!("+{lc}")),
+                    Some(c) if c.title != w.title || c.description != w.description => {
+                        Some(format!("~{lc}"))
+                    }
+                    _ => None,
+                })
+                .chain(
+                    cur.keys()
+                        .filter(|lc| !want.contains_key(**lc))
+                        .map(|lc| format!("-{lc}")),
+                )
+                .collect();
+            diffs.sort();
+            (Status::Drift, Status::Updated, diffs.join(" "))
+        };
         if !apply {
-            r.add("listing", pid, Status::Create, detail);
+            r.add("listing", pid, pending, detail);
             return;
         }
         let body =
@@ -354,7 +381,7 @@ impl Play {
         match self.cli.r#do("PATCH", &path, Some(&body)) {
             Err(e) => r.add("listing", pid, Status::Error, e),
             Ok(resp) if !resp.ok() => r.add("listing", pid, Status::Error, resp.error()),
-            Ok(_) => r.add("listing", pid, Status::Created, detail),
+            Ok(_) => r.add("listing", pid, done, detail),
         }
     }
 
@@ -486,13 +513,61 @@ impl Play {
             r.add("oneTimeProduct", pid, Status::Exists, "");
             return;
         }
-        if !apply {
-            let detail = if opt.found {
-                "update / activate"
+        let currency = self.cfg.pricing.currency.as_str();
+        let desired_price = format!("{currency} {}", prod.price_label());
+        // 既にある商品は、違うところ（価格・状態・掲載）を挙げてドリフトとして報告する。
+        let current_price = opt
+            .configs
+            .iter()
+            .find(|c| c.region_code == region)
+            .map(|c| format!("{} {}", c.currency_code, format_money(&c.units, c.nanos)))
+            .unwrap_or_else(|| "none".to_string());
+        let state = if opt.state.is_empty() {
+            "none"
+        } else {
+            opt.state.as_str()
+        };
+        let mut diffs = Vec::new();
+        if !price_ok {
+            diffs.push(format!("price {current_price}→{desired_price}"));
+        }
+        if opt.state != "ACTIVE" {
+            diffs.push(format!("state {state}→ACTIVE"));
+        }
+        if !listings_ok {
+            diffs.push("listing".to_string());
+        }
+        let report = |r: &mut Report, status: Status| {
+            if !opt.found {
+                let detail = if apply {
+                    desired_price.clone()
+                } else {
+                    "create + activate".into()
+                };
+                r.add("oneTimeProduct", pid, status, detail);
+            } else if !price_ok {
+                // 価格が違うときは current / desired に価格を入れる（機械が読むのは価格）
+                r.add_with(
+                    "oneTimeProduct",
+                    pid,
+                    status,
+                    diffs.join(", "),
+                    current_price.clone(),
+                    desired_price.clone(),
+                );
             } else {
-                "create + activate"
-            };
-            r.add("oneTimeProduct", pid, Status::Create, detail);
+                r.add("oneTimeProduct", pid, status, diffs.join(", "));
+            }
+        };
+        if !apply {
+            report(
+                r,
+                if opt.found {
+                    Status::Drift
+                } else {
+                    Status::Create
+                },
+            );
             return;
         }
         let res = (|| {
@@ -509,11 +584,13 @@ impl Play {
             self.activate_one_time_option(pkg, pid, ONE_TIME_BUY_OPTION)
         })();
         match res {
-            Ok(()) => r.add(
-                "oneTimeProduct",
-                pid,
-                Status::Created,
-                format!("{} {}", self.cfg.pricing.currency, prod.price_label()),
+            Ok(()) => report(
+                r,
+                if opt.found {
+                    Status::Updated
+                } else {
+                    Status::Created
+                },
             ),
             Err(e) => r.add("oneTimeProduct", pid, Status::Error, e),
         }

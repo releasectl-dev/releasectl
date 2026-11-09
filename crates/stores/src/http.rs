@@ -111,6 +111,12 @@ impl Client {
                 attempt += 1;
                 continue;
             }
+            // 5xx は GET だけ再試行する（1 秒・2 秒・4 秒）。書き込みは二重に作らないよう再試行しない。
+            if (500..600).contains(&status) && method == reqwest::Method::GET && attempt < 3 {
+                std::thread::sleep(Duration::from_secs(1 << attempt));
+                attempt += 1;
+                continue;
+            }
             return Ok(Response { status, body });
         }
     }

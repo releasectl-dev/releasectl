@@ -4,5 +4,5 @@
 pub mod action;
 pub mod config;
 
-pub use action::{Action, Report, Status};
+pub use action::{Action, JSON_VERSION, Report, RunReport, Status, Summary, exit_code};
 pub use config::{Config, ConfigError, Product};
