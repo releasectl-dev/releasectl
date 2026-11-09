@@ -1,0 +1,116 @@
+name: releasectl
+description: App Store Connect / Google Play の課金カタログを iap.yaml から plan / apply する（鍵は Secrets から env で渡す）
+author: releasectl-dev
+
+inputs:
+  command:
+    description: plan / apply / retire-plan / retire
+    default: plan
+  config:
+    description: desired-state の YAML
+    default: iap.yaml
+  only:
+    description: provider を絞る（appstore,googleplay）。空なら全部
+    default: ""
+  comment:
+    description: PR にコメントする（push のときは、その commit の PR に結果を付ける）
+    default: "true"
+  github-token:
+    description: コメントに使うトークン
+    default: ${{ github.token }}
+
+outputs:
+  exitcode:
+    description: 0 差分なし / 2 差分あり / 1 エラー
+    value: ${{ steps.run.outputs.exitcode }}
+  has-changes:
+    description: true / false
+    value: ${{ steps.run.outputs.has-changes }}
+  json:
+    description: -o json の結果のファイルのパス
+    value: ${{ steps.run.outputs.json }}
+
+runs:
+  using: composite
+  steps:
+    # Phase 3（署名バイナリの配布）までは、uses: に書いたタグのソースからビルドする。
+    - name: Cache releasectl build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ${{ runner.temp }}/releasectl-target
+        key: releasectl-${{ runner.os }}-${{ github.action_ref || github.sha }}
+        restore-keys: releasectl-${{ runner.os }}-
+
+    - name: Install releasectl
+      shell: bash
+      env:
+        CARGO_TARGET_DIR: ${{ runner.temp }}/releasectl-target
+      run: |
+        set -euo pipefail
+        rustup toolchain install stable --profile minimal --no-self-update >/dev/null
+        cargo +stable install --locked --quiet --path "$GITHUB_ACTION_PATH/crates/cli" --root "$RUNNER_TEMP/releasectl"
+        echo "$RUNNER_TEMP/releasectl/bin" >> "$GITHUB_PATH"
+
+    - name: releasectl ${{ inputs.command }}
+      id: run
+      shell: bash
+      env:
+        RC_COMMAND: ${{ inputs.command }}
+        RC_CONFIG: ${{ inputs.config }}
+        RC_ONLY: ${{ inputs.only }}
+      run: |
+        set -uo pipefail
+        case "$RC_COMMAND" in plan|apply|retire-plan|retire) ;; *) echo "::error::unknown command: $RC_COMMAND"; exit 1;; esac
+        json="$RUNNER_TEMP/releasectl.json"; md="$RUNNER_TEMP/releasectl.md"
+        args=(iap "$RC_COMMAND" --config "$RC_CONFIG" --detailed-exitcode --json-out "$json" --markdown-out "$md")
+        [ -n "$RC_ONLY" ] && args+=(--only "$RC_ONLY")
+        # 鍵は env のまま CLI に渡す。ここでは触らない・ログに出さない。
+        releasectl "${args[@]}"
+        code=$?
+        [ -f "$md" ] && cat "$md" >> "$GITHUB_STEP_SUMMARY"
+        echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+        echo "has-changes=$([ "$code" = 2 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        echo "json=$json" >> "$GITHUB_OUTPUT"
+        echo "markdown=$md" >> "$GITHUB_OUTPUT"
+        # 差分あり（2）は成功。エラー（1）だけ失敗にする。コメントは失敗しても付けたいので後で落とす。
+        exit 0
+
+    - name: Comment on the pull request
+      if: inputs.comment == 'true' && steps.run.outputs.markdown != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RC_COMMAND: ${{ inputs.command }}
+        RC_MD: ${{ steps.run.outputs.markdown }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        [ -f "$RC_MD" ] || exit 0
+        repo="$GITHUB_REPOSITORY"
+        marker="<!-- releasectl:$RC_COMMAND -->"
+        if [ -n "${PR_NUMBER:-}" ]; then
+          # PR: 印の付いたコメントを 1 つだけ持ち、書き換える（sticky）
+          id=$(gh api "repos/$repo/issues/$PR_NUMBER/comments" --paginate \
+                 --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$repo/issues/comments/$id" -F body=@"$RC_MD" >/dev/null
+          else
+            gh api -X POST "repos/$repo/issues/$PR_NUMBER/comments" -F body=@"$RC_MD" >/dev/null
+          fi
+        else
+          # push: その commit を含む PR に結果を付ける（無ければ job summary だけ）
+          pr=$(gh api "repos/$repo/commits/$GITHUB_SHA/pulls" --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -n "$pr" ]; then
+            gh api -X POST "repos/$repo/issues/$pr/comments" -F body=@"$RC_MD" >/dev/null
+          fi
+        fi
+
+    - name: Fail on error
+      if: steps.run.outputs.exitcode == '1'
+      shell: bash
+      run: |
+        echo "::error::releasectl ${{ inputs.command }} reported errors (see the job summary)"
+        exit 1

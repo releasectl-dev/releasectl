@@ -12,6 +12,7 @@ target/release/releasectl iap plan  --config iap.yaml --only googleplay
 target/release/releasectl iap retire-plan --config iap.yaml             # 販売停止の差分（書き込みなし）
 target/release/releasectl play upload-plan --package <id> --aab app.aab   # .aab を上げて検証し、捨てる
 target/release/releasectl iap plan --config iap.yaml -o json --detailed-exitcode   # CI 向け（差分ありで exit 2）
+target/release/releasectl iap plan --config iap.yaml -o markdown                    # PR コメント用
 ```
 
 出力の記号: `+` 作成予定 / `~` ドリフト（あるが違う）/ `✓` 作った・直した / `=` 一致 / `-` 飛ばした / `✗` エラー。
@@ -24,6 +25,22 @@ target/release/releasectl iap plan --config iap.yaml -o json --detailed-exitcode
 |---|---|
 | Google Play | `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`（インライン）または `GOOGLE_PLAY_SERVICE_ACCOUNT_PATH` または `GOOGLE_APPLICATION_CREDENTIALS` |
 | App Store | `ASC_KEY_ID`、`ASC_ISSUER_ID`、`ASC_PRIVATE_KEY` または `ASC_PRIVATE_KEY_PATH` |
+
+## GitHub Actions
+
+```yaml
+- uses: releasectl-dev/releasectl@v0.3.0
+  with:
+    command: ${{ github.event_name == 'pull_request' && 'plan' || 'apply' }}
+    config: iap.yaml
+  env:   # 鍵は Secrets から env で渡す（releasectl には送られない）
+    ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+    ...
+```
+
+PR に plan の差分を sticky コメントし、main への merge で apply する。仕様はワークスペースの
+`docs/02_cli-architecture/04-github-actions.md`。このリポジトリ自身も `.github/workflows/e2e.yml` でテストアプリの
+カタログを回している。
 
 ## 構成
 

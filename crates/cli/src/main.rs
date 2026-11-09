@@ -66,12 +66,20 @@ struct Args {
     /// 終了コードを 0 = 差分なし / 2 = 差分あり / 1 = エラー にする（terraform と同じ）
     #[arg(long)]
     detailed_exitcode: bool,
+    /// JSON をこのファイルにも書く（標準出力とは別。GitHub Actions が 1 回の実行で使う）
+    #[arg(long)]
+    json_out: Option<PathBuf>,
+    /// Markdown（PR コメント用）をこのファイルにも書く
+    #[arg(long)]
+    markdown_out: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
 enum Output {
     Text,
     Json,
+    /// PR コメントと job summary 用
+    Markdown,
 }
 
 #[derive(Subcommand)]
@@ -122,8 +130,8 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &Args, mode: Mode) -> ExitCode {
-    let json = args.output == Output::Json;
-    // json のときは標準出力に JSON 1 つだけを出す。人向けの行はここを通して捨てる。
+    let json = args.output != Output::Text;
+    // json / markdown のときは標準出力にそれ 1 つだけを出す。人向けの行はここを通して捨てる。
     let say = |line: String| {
         if !json {
             println!("{line}");
@@ -198,7 +206,7 @@ fn run(args: &Args, mode: Mode) -> ExitCode {
         }
         _ => {}
     }
-    if json {
+    if json || args.json_out.is_some() || args.markdown_out.is_some() {
         let rep = RunReport {
             version: JSON_VERSION,
             app,
@@ -211,10 +219,21 @@ fn run(args: &Args, mode: Mode) -> ExitCode {
             summary: Summary::of(&all),
             actions: &all,
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&rep).expect("serialize report")
-        );
+        let json_text = serde_json::to_string_pretty(&rep).expect("serialize report");
+        let md = releasectl_core::markdown::render(&rep);
+        match args.output {
+            Output::Markdown => print!("{md}"),
+            Output::Json => println!("{json_text}"),
+            Output::Text => {}
+        }
+        for (path, body) in [(&args.json_out, &json_text), (&args.markdown_out, &md)] {
+            if let Some(path) = path
+                && let Err(e) = std::fs::write(path, body)
+            {
+                eprintln!("write {}: {e}", path.display());
+                had_fatal = true;
+            }
+        }
     }
     ExitCode::from(exit_code(&all, had_fatal, args.detailed_exitcode))
 }

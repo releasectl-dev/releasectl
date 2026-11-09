@@ -3,6 +3,7 @@
 
 pub mod action;
 pub mod config;
+pub mod markdown;
 
 pub use action::{Action, JSON_VERSION, Report, RunReport, Status, Summary, exit_code};
 pub use config::{Config, ConfigError, Product};

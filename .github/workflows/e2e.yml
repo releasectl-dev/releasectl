@@ -1,0 +1,39 @@
+# テストアプリ（dev.releasectl.e2e）のカタログを GitOps で回す。releasectl 自身が最初の利用者。
+# PR: plan を PR にコメント（コードの変更でも流して回帰を見る）。main への merge でカタログが変わったら apply。
+# 鍵はこのリポジトリの Secrets（テストアプリを触れる ASC キーと Play のサービスアカウント）。
+name: e2e
+on:
+  pull_request:
+    paths:
+      - e2e/catalog.yaml
+      - crates/**
+      - Cargo.lock
+      - action.yml
+      - .github/workflows/e2e.yml
+  push:
+    branches: [main]
+    paths:
+      - e2e/catalog.yaml
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: false   # apply を途中で止めない
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  releasectl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          command: ${{ github.event_name == 'pull_request' && 'plan' || 'apply' }}
+          config: e2e/catalog.yaml
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
