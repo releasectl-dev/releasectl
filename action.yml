@@ -16,8 +16,11 @@ inputs:
     description: PR にコメントする（push のときは、その commit の PR に結果を付ける）
     default: "true"
   github-token:
-    description: コメントに使うトークン
+    description: コメント・Issue に使うトークン
     default: ${{ github.token }}
+  drift-issue:
+    description: plan の差分を Issue で知らせる（定期実行用。差分があれば開いて内容が変わったときだけ更新、消えたら閉じる）
+    default: "false"
 
 outputs:
   exitcode:
@@ -80,7 +83,8 @@ runs:
         exit 0
 
     - name: Comment on the pull request
-      if: inputs.comment == 'true' && steps.run.outputs.markdown != ''
+      # PR と push のときだけ（定期実行で main の最新 commit の PR にコメントしないように）
+      if: inputs.comment == 'true' && steps.run.outputs.markdown != '' && (github.event_name == 'pull_request' || github.event_name == 'push')
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -107,6 +111,54 @@ runs:
           if [ -n "$pr" ]; then
             gh api -X POST "repos/$repo/issues/$pr/comments" -F body=@"$RC_MD" >/dev/null
           fi
+        fi
+
+    - name: Drift issue
+      if: inputs.drift-issue == 'true' && inputs.command == 'plan' && (steps.run.outputs.exitcode == '0' || steps.run.outputs.exitcode == '2')
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RC_CONFIG: ${{ inputs.config }}
+        RC_MD: ${{ steps.run.outputs.markdown }}
+        RC_CODE: ${{ steps.run.outputs.exitcode }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -euo pipefail
+        repo="$GITHUB_REPOSITORY"
+        label=releasectl-drift
+        marker="<!-- releasectl:drift:$RC_CONFIG -->"
+        issue=$(gh issue list -R "$repo" --state open --label "$label" --limit 100 --json number,body \
+                  --jq "map(select(.body | startswith(\"$marker\"))) | .[0].number // empty" 2>/dev/null || true)
+
+        if [ "$RC_CODE" = 0 ]; then
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" -R "$repo" --body "✅ 解消しました（plan が差分なし）: $RUN_URL" >/dev/null
+            gh issue close "$issue" -R "$repo" >/dev/null
+            echo "drift issue #$issue を閉じた"
+          fi
+          exit 0
+        fi
+
+        # 本文 = 印 + plan の Markdown（先頭の plan の印は除く）。末尾の「検出:」は比較から外す。
+        content="$RUNNER_TEMP/drift-content.md"; body="$RUNNER_TEMP/drift-body.md"
+        { echo "$marker"; tail -n +2 "$RC_MD"; } > "$content"
+        { cat "$content"; echo; echo "---"; echo "検出: $RUN_URL（$(date -u +%Y-%m-%dT%H:%MZ)）"; } > "$body"
+
+        if [ -z "$issue" ]; then
+          gh label create "$label" -R "$repo" --color D93F0B --description "releasectl: ストアのカタログが desired-state とずれている" --force >/dev/null
+          url=$(gh issue create -R "$repo" --title "releasectl: ストアのカタログが $RC_CONFIG とずれています" --label "$label" --body-file "$body")
+          echo "drift issue を開いた: $url"
+          exit 0
+        fi
+        old="$RUNNER_TEMP/drift-old.md"
+        gh issue view "$issue" -R "$repo" --json body --jq .body | sed '/^---$/,$d' > "$old"
+        # 末尾の空行の違いは無視して比べる
+        if diff -q <(sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$old") <(sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$content") >/dev/null; then
+          echo "drift issue #$issue: 内容は前回と同じ（何もしない）"
+        else
+          gh issue edit "$issue" -R "$repo" --body-file "$body" >/dev/null
+          gh issue comment "$issue" -R "$repo" --body "🔄 ドリフトの内容が変わりました: $RUN_URL" >/dev/null
+          echo "drift issue #$issue を更新した"
         fi
 
     - name: Fail on error
