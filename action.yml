@@ -68,8 +68,9 @@ runs:
         args=(iap "$RC_COMMAND" --config "$RC_CONFIG" --detailed-exitcode --json-out "$json" --markdown-out "$md")
         [ -n "$RC_ONLY" ] && args+=(--only "$RC_ONLY")
         # 鍵は env のまま CLI に渡す。ここでは触らない・ログに出さない。
-        releasectl "${args[@]}"
-        code=$?
+        # Actions の bash は -e 付きで起動する。差分あり（2）で止まらないよう終了コードを受け取る。
+        code=0
+        releasectl "${args[@]}" || code=$?
         [ -f "$md" ] && cat "$md" >> "$GITHUB_STEP_SUMMARY"
         echo "exitcode=$code" >> "$GITHUB_OUTPUT"
         echo "has-changes=$([ "$code" = 2 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
