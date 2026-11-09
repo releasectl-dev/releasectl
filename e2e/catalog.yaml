@@ -48,7 +48,7 @@ products:
     playProductId: e2e_weekly
     playBasePlanId: weekly
     period: P1W
-    price: 0.99
+    price: 1.49
     localizations:
       - locale: en-US
         name: "E2E Weekly"
