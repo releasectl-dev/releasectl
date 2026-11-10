@@ -6,7 +6,10 @@ use std::time::Duration;
 pub type AuthFn = Box<dyn Fn() -> Result<String, String>>;
 
 pub struct Client {
+    /// JSON の API 用（30 秒）
     http: reqwest::blocking::Client,
+    /// 大きなファイルのアップロード（do_raw）用。数十 MB の .aab や動画を送り切れるよう長くする
+    upload: reqwest::blocking::Client,
     base: String,
     /// Authorization ヘッダの値全体（"Bearer xyz"）を返す。
     auth: Option<AuthFn>,
@@ -54,6 +57,8 @@ pub fn http_client() -> reqwest::blocking::Client {
 pub fn http_client_with_timeout(timeout: Duration) -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .timeout(timeout)
+        // 接続の確立で詰まったら早く諦める（全体のタイムアウトはアップロードのために長いことがある）
+        .connect_timeout(Duration::from_secs(30))
         .build()
         .expect("build http client")
 }
@@ -62,6 +67,7 @@ impl Client {
     pub fn new(http: reqwest::blocking::Client, base: &str, auth: Option<AuthFn>) -> Self {
         Client {
             http,
+            upload: http_client_with_timeout(Duration::from_secs(15 * 60)),
             base: base.to_string(),
             auth,
         }
@@ -98,7 +104,16 @@ impl Client {
                 let v = auth().map_err(|e| format!("auth: {e}"))?;
                 req = req.header("Authorization", v);
             }
-            let resp = req.send().map_err(|e| e.to_string())?;
+            let resp = match req.send() {
+                Ok(resp) => resp,
+                // 通信エラー（タイムアウトなど）も、GET だけは 1 / 2 / 4 秒で再試行する
+                Err(_) if method == reqwest::Method::GET && attempt < 3 => {
+                    std::thread::sleep(Duration::from_secs(1 << attempt));
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => return Err(e.to_string()),
+            };
             let status = resp.status().as_u16();
             let retry = resp
                 .headers()
@@ -124,13 +139,17 @@ impl Client {
 
 impl Client {
     /// 生のバイト列のアップロード（Go 版 `DoRaw`）。JSON にせず、Content-Type を明示する。
-    /// Google Play のメディアアップロードは Authorization が要る。429 は Retry-After に従う。
+    /// `with_auth` が false なら Authorization を付けない（App Store の予約済みアップロード URL は
+    /// Authorization を拒む。Google Play のメディアアップロードは要る）。`extra_headers` はそのまま送る
+    /// （App Store の予約が返す part ごとのヘッダー）。429 は Retry-After に従う。
     pub fn do_raw(
         &self,
         method: &str,
         url: &str,
-        body: Vec<u8>,
+        body: &[u8],
         content_type: &str,
+        with_auth: bool,
+        extra_headers: &[(String, String)],
     ) -> Result<Response, String> {
         let full = if url.starts_with("http://") || url.starts_with("https://") {
             url.to_string()
@@ -141,11 +160,16 @@ impl Client {
         let mut attempt = 0;
         loop {
             let mut req = self
-                .http
+                .upload
                 .request(method.clone(), &full)
-                .header("Content-Type", content_type)
-                .body(body.clone());
-            if let Some(auth) = &self.auth {
+                .body(body.to_vec());
+            if !content_type.is_empty() {
+                req = req.header("Content-Type", content_type);
+            }
+            for (k, v) in extra_headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            if with_auth && let Some(auth) = &self.auth {
                 let v = auth().map_err(|e| format!("auth: {e}"))?;
                 req = req.header("Authorization", v);
             }

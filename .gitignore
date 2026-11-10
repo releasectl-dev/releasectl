@@ -5,3 +5,4 @@ iap.yaml
 *service-account*.json
 .env
 .DS_Store
+e2e/shots/

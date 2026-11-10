@@ -4,10 +4,10 @@ author: releasectl-dev
 
 inputs:
   command:
-    description: plan / apply / retire-plan / retire
+    description: plan / apply / retire-plan / retire（課金カタログ）、meta-plan / meta-apply（掲載情報）
     default: plan
   config:
-    description: desired-state の YAML
+    description: desired-state の YAML（課金カタログは iap.yaml、掲載情報は metadata.yaml など）
     default: iap.yaml
   only:
     description: provider を絞る（appstore,googleplay）。空なら全部
@@ -66,9 +66,13 @@ runs:
         RC_ONLY: ${{ inputs.only }}
       run: |
         set -uo pipefail
-        case "$RC_COMMAND" in plan|apply|retire-plan|retire) ;; *) echo "::error::unknown command: $RC_COMMAND"; exit 1;; esac
+        case "$RC_COMMAND" in
+          plan|apply|retire-plan|retire) sub=(iap "$RC_COMMAND") ;;
+          meta-plan|meta-apply) sub=(meta "${RC_COMMAND#meta-}") ;;
+          *) echo "::error::unknown command: $RC_COMMAND"; exit 1 ;;
+        esac
         json="$RUNNER_TEMP/releasectl.json"; md="$RUNNER_TEMP/releasectl.md"
-        args=(iap "$RC_COMMAND" --config "$RC_CONFIG" --detailed-exitcode --json-out "$json" --markdown-out "$md")
+        args=("${sub[@]}" --config "$RC_CONFIG" --detailed-exitcode --json-out "$json" --markdown-out "$md")
         [ -n "$RC_ONLY" ] && args+=(--only "$RC_ONLY")
         # 鍵は env のまま CLI に渡す。ここでは触らない・ログに出さない。
         # Actions の bash は -e 付きで起動する。差分あり（2）で止まらないよう終了コードを受け取る。
@@ -114,7 +118,7 @@ runs:
         fi
 
     - name: Drift issue
-      if: inputs.drift-issue == 'true' && inputs.command == 'plan' && (steps.run.outputs.exitcode == '0' || steps.run.outputs.exitcode == '2')
+      if: inputs.drift-issue == 'true' && (inputs.command == 'plan' || inputs.command == 'meta-plan') && (steps.run.outputs.exitcode == '0' || steps.run.outputs.exitcode == '2')
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}

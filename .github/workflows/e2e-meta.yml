@@ -1,0 +1,42 @@
+# テストアプリ（dev.releasectl.e2e）の掲載情報を GitOps で回す（e2e.yml の meta 版）。
+# PR: meta plan を PR にコメント。main への merge で掲載情報か画像の作り方が変わったら meta apply。
+# 画像はリポジトリに入れず、e2e/make_shots.py でその場で作る。
+name: e2e-meta
+on:
+  pull_request:
+    paths:
+      - e2e/metadata.yaml
+      - e2e/make_shots.py
+      - crates/**
+      - Cargo.lock
+      - action.yml
+      - .github/workflows/e2e-meta.yml
+  push:
+    branches: [main]
+    paths:
+      - e2e/metadata.yaml
+      - e2e/make_shots.py
+
+concurrency:
+  group: e2e-meta-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  releasectl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 e2e/make_shots.py
+      - uses: ./
+        with:
+          command: ${{ github.event_name == 'pull_request' && 'meta-plan' || 'meta-apply' }}
+          config: e2e/metadata.yaml
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}

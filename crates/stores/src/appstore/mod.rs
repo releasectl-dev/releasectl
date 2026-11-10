@@ -27,6 +27,11 @@ pub struct AppStore {
 
 /// ASC_* の env から認証済みクライアントを作る。鍵が無ければ `Err(理由)`。
 pub fn new_client() -> Result<Client, String> {
+    new_client_with(http::http_client())
+}
+
+/// HTTP クライアントを指定して作る（掲載画像・動画のアップロードはタイムアウトを延ばす）。
+pub fn new_client_with(hc: reqwest::blocking::Client) -> Result<Client, String> {
     let (Some(key_id), Some(issuer_id)) = (env("ASC_KEY_ID"), env("ASC_ISSUER_ID")) else {
         return Err("ASC_KEY_ID / ASC_ISSUER_ID not set".into());
     };
@@ -42,7 +47,7 @@ pub fn new_client() -> Result<Client, String> {
     };
     let ts = Rc::new(auth::TokenSource::new(key_id, issuer_id, &pem)?);
     let auth: http::AuthFn = Box::new(move || ts.token().map(|t| format!("Bearer {t}")));
-    Ok(Client::new(http::http_client(), API_BASE, Some(auth)))
+    Ok(Client::new(hc, API_BASE, Some(auth)))
 }
 
 pub fn build(cfg: &Config) -> Result<Box<dyn Reconciler>, String> {
@@ -55,17 +60,33 @@ pub fn build(cfg: &Config) -> Result<Box<dyn Reconciler>, String> {
 
 // --- JSON:API ---
 
-/// 一覧の 1 件（id と attributes）。
-struct Resource {
-    id: String,
-    attributes: Value,
+/// 一覧を links.next をたどって全部取る。
+pub(crate) fn get_all(cli: &Client, first: &str, what: &str) -> Result<Vec<Resource>, String> {
+    let mut out = Vec::new();
+    let mut path = first.to_string();
+    while !path.is_empty() {
+        let resp = cli.r#do("GET", &path, None)?;
+        if !resp.ok() {
+            return Err(format!("{what}: {}", resp.error()));
+        }
+        let (data, next) = parse_list(&resp)?;
+        out.extend(data);
+        path = next;
+    }
+    Ok(out)
 }
 
-fn attr<'a>(r: &'a Resource, name: &str) -> &'a str {
+/// 一覧の 1 件（id と attributes）。
+pub(crate) struct Resource {
+    pub(crate) id: String,
+    pub(crate) attributes: Value,
+}
+
+pub(crate) fn attr<'a>(r: &'a Resource, name: &str) -> &'a str {
     r.attributes.get(name).and_then(Value::as_str).unwrap_or("")
 }
 
-fn parse_list(resp: &Response) -> Result<(Vec<Resource>, String), String> {
+pub(crate) fn parse_list(resp: &Response) -> Result<(Vec<Resource>, String), String> {
     let v: Value = resp.json()?;
     let data = v
         .get("data")
@@ -92,7 +113,7 @@ fn parse_list(resp: &Response) -> Result<(Vec<Resource>, String), String> {
 }
 
 /// 作成のレスポンスの data.id。
-fn created_id(resp: &Response) -> Option<String> {
+pub(crate) fn created_id(resp: &Response) -> Option<String> {
     let v: Value = resp.json().ok()?;
     v.pointer("/data/id")
         .and_then(Value::as_str)
@@ -234,18 +255,7 @@ enum Kind {
 impl AppStore {
     /// 一覧を links.next をたどって全部取る。
     fn get_all(&self, first: &str, what: &str) -> Result<Vec<Resource>, String> {
-        let mut out = Vec::new();
-        let mut path = first.to_string();
-        while !path.is_empty() {
-            let resp = self.cli.r#do("GET", &path, None)?;
-            if !resp.ok() {
-                return Err(format!("{what}: {}", resp.error()));
-            }
-            let (data, next) = parse_list(&resp)?;
-            out.extend(data);
-            path = next;
-        }
-        Ok(out)
+        get_all(&self.cli, first, what)
     }
 
     fn find_app_id(&self) -> Result<Option<String>, String> {

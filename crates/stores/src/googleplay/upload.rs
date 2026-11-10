@@ -4,10 +4,8 @@
 //! トラックをその versionCode に向ける → commit。plan（`apply = false`）は上げて検証
 //! （validate）までして edit を捨てるので、公開されるものは何も変わらない。
 
-use super::new_client_with;
-use crate::http::{self, Client};
+use crate::http::Client;
 use serde_json::{Value, json};
-use std::time::Duration;
 
 const UPLOAD_BASE: &str = "https://androidpublisher.googleapis.com/upload/androidpublisher/v3";
 
@@ -23,9 +21,8 @@ pub struct UploadArgs<'a> {
 
 /// 進み具合は `log` に 1 行ずつ渡す（CLI が表示する）。
 pub fn upload(args: &UploadArgs, apply: bool, log: &mut dyn FnMut(String)) -> Result<(), String> {
-    // 既定の 30 秒では数十 MB の .aab を送り切れない。
-    let cli = new_client_with(http::http_client_with_timeout(Duration::from_secs(15 * 60)))
-        .map_err(|e| format!("google play auth: {e}"))?;
+    // .aab は do_raw（アップロード用の長いタイムアウト）で送る。
+    let cli = super::new_client().map_err(|e| format!("google play auth: {e}"))?;
     let pkg = args.package;
     let edit_id = insert_edit(&cli, pkg)?;
     let edit_path = format!("/applications/{pkg}/edits/{edit_id}");
@@ -39,8 +36,10 @@ pub fn upload(args: &UploadArgs, apply: bool, log: &mut dyn FnMut(String)) -> Re
         let resp = cli.do_raw(
             "POST",
             &format!("{UPLOAD_BASE}{edit_path}/bundles?uploadType=media"),
-            args.aab.to_vec(),
+            args.aab,
             "application/octet-stream",
+            true,
+            &[],
         )?;
         if !resp.ok() {
             return Err(format!("upload bundle: {}", resp.error()));

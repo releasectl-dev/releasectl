@@ -1,0 +1,73 @@
+# E2E 用のテストアプリ（dev.releasectl.e2e）の掲載情報。審査には出さない。
+# 画像は make_shots.py が作る（python3 e2e/make_shots.py [VARIANT]。VARIANT で中身を変えて差し替えを確かめる）。
+appName: releasectl-e2e
+bundleId: dev.releasectl.e2e
+packageName: dev.releasectl.e2e
+
+review:
+  contactFirstName: Release
+  contactLastName: Ctl
+  contactPhone: "+81 3 1234 5678"
+  contactEmail: e2e@example.com
+  demoAccountRequired: false
+  notes: |
+    releasectl の E2E 用のテストアプリです。審査には出しません。
+
+ageRating:
+  preset: none
+
+appstore:
+  primaryCategory: DEVELOPER_TOOLS
+  secondaryCategory: UTILITIES
+  contentRights: none
+  copyright: "2026 releasectl"
+  price: free
+
+playContact:
+  email: e2e@example.com
+  website: https://github.com/releasectl-dev
+
+defaultLanguage: en-US
+
+locales:
+  - locale: en-US
+    name: "releasectl e2e"
+    subtitle: "Test app for releasectl"
+    shortDescription: "Test app used by releasectl end-to-end checks."
+    description: |
+      This app exists only so releasectl can check its store writes end to end.
+      It is never submitted for review.
+    keywords: "releasectl,e2e,test"
+    promotionalText: "End-to-end test app for releasectl."
+    supportUrl: https://github.com/releasectl-dev
+    marketingUrl: https://github.com/releasectl-dev
+    privacyPolicyUrl: https://github.com/releasectl-dev
+
+  - locale: ja
+    name: "releasectl e2e"
+    subtitle: "releasectl のテスト用アプリ"
+    shortDescription: "releasectl の E2E の確認に使うテスト用アプリ。"
+    description: |
+      releasectl がストアへの書き込みを端から端まで確かめるためだけのアプリです。
+      審査には出しません。
+    keywords: "releasectl,e2e,テスト"
+    promotionalText: "releasectl の E2E 用のテストアプリ。"
+    supportUrl: https://github.com/releasectl-dev
+    privacyPolicyUrl: https://github.com/releasectl-dev
+
+screenshots:
+  baseDir: shots
+  appstore:
+    - displayType: APP_IPHONE_67
+      dir: appstore_iphone
+  play:
+    - imageType: phoneScreenshots
+      dir: play_phone
+    - imageType: featureGraphic
+      dir: play_feature
+    - imageType: icon
+      dir: play_icon
+  creatives:
+    - placementType: APP_STORE_SEARCH_RESULTS_ASSET
+      dir: search
+      file: search.png

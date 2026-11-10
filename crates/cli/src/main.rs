@@ -1,15 +1,17 @@
-//! releasectl — App Store Connect / Google Play の課金カタログを 1 枚の iap.yaml
-//! から reconcile する CLI。
+//! releasectl — App Store Connect / Google Play の課金カタログ（iap.yaml）と掲載情報
+//! （metadata.yaml）を reconcile する CLI。
 //!
 //! `plan` は書き込みをせず、`apply` が何を作るかを表示する。鍵の env が無い
 //! provider は飛ばすので、持っている鍵の分だけ実行できる。どれも冪等。
 
 use clap::{Parser, Subcommand};
+use releasectl_core::meta::MetaConfig;
 use releasectl_core::{
     Action, Config, JSON_VERSION, Report, RunReport, Status, Summary, exit_code,
 };
-use releasectl_stores::PROVIDERS;
 use releasectl_stores::googleplay::upload::{UploadArgs, upload};
+use releasectl_stores::meta::META_PROVIDERS;
+use releasectl_stores::{PROVIDERS, Reconciler};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -18,7 +20,7 @@ use std::process::ExitCode;
 #[command(
     name = "releasectl",
     version,
-    about = "App Store Connect / Google Play の課金カタログを iap.yaml から reconcile する"
+    about = "App Store Connect / Google Play の課金カタログと掲載情報を YAML から reconcile する"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -31,6 +33,11 @@ enum Top {
     Iap {
         #[command(subcommand)]
         command: IapCmd,
+    },
+    /// ストアの掲載情報（テキスト・審査情報・アプリの設定・スクリーンショット・クリエイティブ）
+    Meta {
+        #[command(subcommand)]
+        command: MetaCmd,
     },
     /// Google Play のビルド
     Play {
@@ -52,11 +59,19 @@ enum IapCmd {
     Retire(Args),
 }
 
+#[derive(Subcommand)]
+enum MetaCmd {
+    /// apply が何を変えるかを表示する。公開されるものは何も書かない（Play は edit を開いて捨てる）
+    Plan(Args),
+    /// 掲載情報を書く。冪等で再実行してよい。審査への提出はしない
+    Apply(Args),
+}
+
 #[derive(clap::Args)]
 struct Args {
-    /// desired-state の YAML
-    #[arg(short, long, default_value = "iap.yaml")]
-    config: PathBuf,
+    /// desired-state の YAML（既定: iap は iap.yaml、meta は metadata.yaml）
+    #[arg(short, long)]
+    config: Option<PathBuf>,
     /// 実行する provider をカンマ区切りで絞る（appstore,googleplay）
     #[arg(long, value_delimiter = ',')]
     only: Vec<String>,
@@ -107,6 +122,12 @@ struct UploadCli {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Iap,
+    Meta,
+}
+
+#[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Plan,
     Apply,
@@ -117,10 +138,14 @@ enum Mode {
 fn main() -> ExitCode {
     match Cli::parse().command {
         Top::Iap { command } => match command {
-            IapCmd::Plan(a) => run(&a, Mode::Plan),
-            IapCmd::Apply(a) => run(&a, Mode::Apply),
-            IapCmd::RetirePlan(a) => run(&a, Mode::RetirePlan),
-            IapCmd::Retire(a) => run(&a, Mode::Retire),
+            IapCmd::Plan(a) => run(&a, Kind::Iap, Mode::Plan),
+            IapCmd::Apply(a) => run(&a, Kind::Iap, Mode::Apply),
+            IapCmd::RetirePlan(a) => run(&a, Kind::Iap, Mode::RetirePlan),
+            IapCmd::Retire(a) => run(&a, Kind::Iap, Mode::Retire),
+        },
+        Top::Meta { command } => match command {
+            MetaCmd::Plan(a) => run(&a, Kind::Meta, Mode::Plan),
+            MetaCmd::Apply(a) => run(&a, Kind::Meta, Mode::Apply),
         },
         Top::Play { command } => match command {
             PlayCmd::UploadPlan(a) => play_upload(&a, false),
@@ -129,7 +154,41 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: &Args, mode: Mode) -> ExitCode {
+type Build<'a> = Box<dyn Fn() -> Result<Box<dyn Reconciler>, String> + 'a>;
+/// 実行順の provider（名前と、その reconciler の作り方）。
+type Providers = Vec<(&'static str, Build<'static>)>;
+
+/// 設定を読み、(アプリ名, 実行順の provider) を返す。
+fn load(kind: Kind, path: &std::path::Path) -> Result<(String, Providers), String> {
+    match kind {
+        Kind::Iap => {
+            let cfg = std::rc::Rc::new(Config::load(path).map_err(|e| e.to_string())?);
+            let app = cfg.app_name.clone();
+            let list = PROVIDERS
+                .iter()
+                .map(|(name, build)| {
+                    let (cfg, build) = (cfg.clone(), *build);
+                    (*name, Box::new(move || build(&cfg)) as Build)
+                })
+                .collect();
+            Ok((app, list))
+        }
+        Kind::Meta => {
+            let cfg = std::rc::Rc::new(MetaConfig::load(path).map_err(|e| e.to_string())?);
+            let app = cfg.app_name.clone();
+            let list = META_PROVIDERS
+                .iter()
+                .map(|(name, build)| {
+                    let (cfg, build) = (cfg.clone(), *build);
+                    (*name, Box::new(move || build(&cfg)) as Build)
+                })
+                .collect();
+            Ok((app, list))
+        }
+    }
+}
+
+fn run(args: &Args, kind: Kind, mode: Mode) -> ExitCode {
     let json = args.output != Output::Text;
     // json / markdown のときは標準出力にそれ 1 つだけを出す。人向けの行はここを通して捨てる。
     let say = |line: String| {
@@ -137,8 +196,14 @@ fn run(args: &Args, mode: Mode) -> ExitCode {
             println!("{line}");
         }
     };
-    let cfg = match Config::load(&args.config) {
-        Ok(c) => c,
+    let path = args.config.clone().unwrap_or_else(|| {
+        PathBuf::from(match kind {
+            Kind::Iap => "iap.yaml",
+            Kind::Meta => "metadata.yaml",
+        })
+    });
+    let (app, providers) = match load(kind, &path) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("config: {e}");
             return ExitCode::from(1);
@@ -154,12 +219,14 @@ fn run(args: &Args, mode: Mode) -> ExitCode {
         (!s.is_empty()).then_some(s)
     };
 
-    let app = &cfg.app_name;
-    say(match mode {
-        Mode::Plan => format!("PLAN — no changes will be made ({app:?})"),
-        Mode::Apply => format!("APPLY — creating real store resources for {app:?}"),
-        Mode::RetirePlan => format!("RETIRE PLAN — no changes will be made ({app:?})"),
-        Mode::Retire => {
+    let app = &app;
+    say(match (kind, mode) {
+        (Kind::Meta, Mode::Plan) => format!("PLAN — no published changes will be made ({app:?})"),
+        (Kind::Meta, _) => format!("APPLY — writing store listing metadata for {app:?}"),
+        (_, Mode::Plan) => format!("PLAN — no changes will be made ({app:?})"),
+        (_, Mode::Apply) => format!("APPLY — creating real store resources for {app:?}"),
+        (_, Mode::RetirePlan) => format!("RETIRE PLAN — no changes will be made ({app:?})"),
+        (_, Mode::Retire) => {
             format!("RETIRE — taking real store products OFF SALE for {app:?} (nothing is deleted)")
         }
     });
@@ -167,13 +234,13 @@ fn run(args: &Args, mode: Mode) -> ExitCode {
 
     let mut all: Vec<Action> = Vec::new();
     let mut had_fatal = false;
-    for (name, build) in PROVIDERS {
+    for (name, build) in &providers {
         if selected.as_ref().is_some_and(|s| !s.contains(name)) {
             continue;
         }
         say(format!("\n=== {name} ==="));
         let mut report = Report::new(name);
-        let rec = match build(&cfg) {
+        let rec = match build() {
             Ok(r) => r,
             Err(reason) => {
                 say(format!("  skipped: {reason}"));
@@ -197,11 +264,14 @@ fn run(args: &Args, mode: Mode) -> ExitCode {
         all.extend(report.actions);
     }
 
-    match mode {
-        Mode::Plan => {
+    match (kind, mode) {
+        (Kind::Meta, Mode::Plan) => {
+            say("\nplan only — run `releasectl meta apply` to write the metadata.".into())
+        }
+        (_, Mode::Plan) => {
             say("\nplan only — run `releasectl iap apply` to create the missing resources.".into())
         }
-        Mode::RetirePlan => {
+        (_, Mode::RetirePlan) => {
             say("\nplan only — run `releasectl iap retire` to take the products off sale.".into())
         }
         _ => {}
@@ -210,11 +280,13 @@ fn run(args: &Args, mode: Mode) -> ExitCode {
         let rep = RunReport {
             version: JSON_VERSION,
             app,
-            command: match mode {
-                Mode::Plan => "plan",
-                Mode::Apply => "apply",
-                Mode::RetirePlan => "retire-plan",
-                Mode::Retire => "retire",
+            command: match (kind, mode) {
+                (Kind::Meta, Mode::Plan) => "meta-plan",
+                (Kind::Meta, _) => "meta-apply",
+                (_, Mode::Plan) => "plan",
+                (_, Mode::Apply) => "apply",
+                (_, Mode::RetirePlan) => "retire-plan",
+                (_, Mode::Retire) => "retire",
             },
             summary: Summary::of(&all),
             actions: &all,

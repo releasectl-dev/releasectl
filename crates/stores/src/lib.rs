@@ -4,6 +4,7 @@
 pub mod appstore;
 pub mod googleplay;
 pub mod http;
+pub mod meta;
 
 use releasectl_core::{Config, Report};
 
@@ -18,7 +19,9 @@ pub trait Reconciler {
     fn reconcile(&self, apply: bool, report: &mut Report) -> Result<(), String>;
     /// 設定した商品を販売停止にする（消さない。apply で戻せる）。`apply = false` は書き込みなし。
     /// 販売停止の API が無いストアは、手作業の案内を `Status::Skip` で報告する。
-    fn retire(&self, apply: bool, report: &mut Report) -> Result<(), String>;
+    fn retire(&self, _apply: bool, _report: &mut Report) -> Result<(), String> {
+        Err(format!("{}: retire is not supported here", self.name()))
+    }
 }
 
 /// 鍵が無いときは `Err(理由)` を返し、呼び出し側はその provider を飛ばす。

@@ -1,7 +1,7 @@
 # releasectl
 
-App Store Connect / Google Play の課金カタログ（自動更新サブスク + 買い切り）を、1 枚の
-`iap.yaml` から `plan` / `apply` で reconcile する CLI。sonir の Go 版 releasectl
+App Store Connect / Google Play の課金カタログ（自動更新サブスク + 買い切り）を `iap.yaml` から、掲載情報
+（テキスト・審査情報・アプリの設定・スクリーンショット・クリエイティブ）を `metadata.yaml` から、`plan` / `apply` で reconcile する CLI。sonir の Go 版 releasectl
 （`iapctl`）を Rust に書き直したもの。仕様の正本はワークスペースの `docs/02_cli-architecture/`。
 
 ```bash
@@ -10,6 +10,7 @@ target/release/releasectl iap plan  --config iap.yaml                 # 差分�
 target/release/releasectl iap apply --config iap.yaml                 # 足りないものを作る（冪等）
 target/release/releasectl iap plan  --config iap.yaml --only googleplay
 target/release/releasectl iap retire-plan --config iap.yaml             # 販売停止の差分（書き込みなし）
+target/release/releasectl meta plan --config metadata.yaml              # 掲載情報（テキスト・審査情報・画像）の差分
 target/release/releasectl play upload-plan --package <id> --aab app.aab   # .aab を上げて検証し、捨てる
 target/release/releasectl iap plan --config iap.yaml -o json --detailed-exitcode   # CI 向け（差分ありで exit 2）
 target/release/releasectl iap plan --config iap.yaml -o markdown                    # PR コメント用
@@ -29,7 +30,7 @@ target/release/releasectl iap plan --config iap.yaml -o markdown                
 ## GitHub Actions
 
 ```yaml
-- uses: releasectl-dev/releasectl@v0.4.0
+- uses: releasectl-dev/releasectl@v0.5.0
   with:
     command: ${{ github.event_name == 'pull_request' && 'plan' || 'apply' }}
     config: iap.yaml
