@@ -30,9 +30,9 @@ target/release/releasectl iap plan --config iap.yaml -o markdown                
 ## GitHub Actions
 
 ```yaml
-- uses: releasectl-dev/releasectl@v0.5.0
+- uses: releasectl-dev/releasectl@v0.6.0
   with:
-    command: ${{ github.event_name == 'pull_request' && 'plan' || 'apply' }}
+    command: ${{ github.event_name == 'pull_request' && 'iap-plan' || 'iap-apply' }}
     config: iap.yaml
   env:   # 鍵は Secrets から env で渡す（releasectl には送られない）
     ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}

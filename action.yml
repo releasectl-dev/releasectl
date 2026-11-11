@@ -4,8 +4,8 @@ author: releasectl-dev
 
 inputs:
   command:
-    description: plan / apply / retire-plan / retire（課金カタログ）、meta-plan / meta-apply（掲載情報）
-    default: plan
+    description: iap-plan / iap-apply / iap-retire-plan / iap-retire（課金カタログ）、meta-plan / meta-apply（掲載情報）
+    default: iap-plan
   config:
     description: desired-state の YAML（課金カタログは iap.yaml、掲載情報は metadata.yaml など）
     default: iap.yaml
@@ -67,8 +67,10 @@ runs:
       run: |
         set -uo pipefail
         case "$RC_COMMAND" in
-          plan|apply|retire-plan|retire) sub=(iap "$RC_COMMAND") ;;
+          iap-plan|iap-apply|iap-retire-plan|iap-retire) sub=(iap "${RC_COMMAND#iap-}") ;;
           meta-plan|meta-apply) sub=(meta "${RC_COMMAND#meta-}") ;;
+          plan|apply|retire-plan|retire)
+            echo "::error::command: $RC_COMMAND は v0.6.0 から iap-$RC_COMMAND になりました（meta-plan と同じ書き方）"; exit 1 ;;
           *) echo "::error::unknown command: $RC_COMMAND"; exit 1 ;;
         esac
         json="$RUNNER_TEMP/releasectl.json"; md="$RUNNER_TEMP/releasectl.md"
@@ -118,7 +120,7 @@ runs:
         fi
 
     - name: Drift issue
-      if: inputs.drift-issue == 'true' && (inputs.command == 'plan' || inputs.command == 'meta-plan') && (steps.run.outputs.exitcode == '0' || steps.run.outputs.exitcode == '2')
+      if: inputs.drift-issue == 'true' && (inputs.command == 'iap-plan' || inputs.command == 'meta-plan') && (steps.run.outputs.exitcode == '0' || steps.run.outputs.exitcode == '2')
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}

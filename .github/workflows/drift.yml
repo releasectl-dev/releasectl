@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./
         with:
-          command: plan
+          command: iap-plan
           config: e2e/catalog.yaml
           drift-issue: true
         env:

@@ -121,8 +121,8 @@ mod tests {
     fn no_changes() {
         let mut r = Report::new("googleplay");
         r.add("subscription", "m", Status::Exists, "");
-        let md = render(&rep("plan", &r.actions));
-        assert!(md.starts_with("<!-- releasectl:plan -->\n### releasectl plan — demo"));
+        let md = render(&rep("iap-plan", &r.actions));
+        assert!(md.starts_with("<!-- releasectl:iap-plan -->\n### releasectl iap-plan — demo"));
         assert!(md.contains("差分なし"));
         assert!(md.contains("<details><summary>全 1 件（exists 1）</summary>"));
     }
@@ -133,7 +133,7 @@ mod tests {
         r.add_diff("price", "a.monthly", Status::Drift, "USD 1.99", "USD 2.99");
         r.add("localization", "a|b [en-US]", Status::Drift, "description");
         r.add("group", "Pro", Status::Exists, "");
-        let md = render(&rep("plan", &r.actions));
+        let md = render(&rep("iap-plan", &r.actions));
         assert!(md.contains("📝 **drift 2 · exists 1**"));
         assert!(md.contains("| ~ | appstore | `price` | `a.monthly` | USD 1.99 → USD 2.99 |"));
         // セルの | はエスケープする
@@ -152,13 +152,13 @@ mod tests {
             Status::Skip,
             "ASC_KEY_ID / ASC_ISSUER_ID not set",
         );
-        let md = render(&rep("plan", &r.actions));
+        let md = render(&rep("iap-plan", &r.actions));
         assert!(md.contains("⚠️ **確認していない provider: appstore**"));
         assert!(!md.contains("差分なし"));
         assert!(md.contains("| - | appstore | `provider` | — |"));
         // 片方だけ確認できたなら、差分なしと警告の両方
         r.add("group", "Pro", Status::Exists, "");
-        let md = render(&rep("plan", &r.actions));
+        let md = render(&rep("iap-plan", &r.actions));
         assert!(md.contains("確認していない provider: appstore"));
         assert!(md.contains("差分なし"));
     }
@@ -167,8 +167,8 @@ mod tests {
     fn errors_are_flagged() {
         let mut r = Report::new("appstore");
         r.add("provider", "", Status::Error, "HTTP 500");
-        let md = render(&rep("apply", &r.actions));
+        let md = render(&rep("iap-apply", &r.actions));
         assert!(md.contains("❌ **error 1**"));
-        assert!(md.contains("<!-- releasectl:apply -->"));
+        assert!(md.contains("<!-- releasectl:iap-apply -->"));
     }
 }

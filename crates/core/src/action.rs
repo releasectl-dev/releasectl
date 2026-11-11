@@ -206,7 +206,7 @@ pub struct RunReport<'a> {
     /// JSON の形の版。互換の無い変更をしたら上げる
     pub version: u32,
     pub app: &'a str,
-    /// "plan" | "apply" | "retire-plan" | "retire"
+    /// "iap-plan" | "iap-apply" | "iap-retire-plan" | "iap-retire" | "meta-plan" | "meta-apply"（GitHub Action の command と同じ）
     pub command: &'a str,
     pub summary: Summary,
     pub actions: &'a [Action],
@@ -284,7 +284,7 @@ mod tests {
         let rep = RunReport {
             version: JSON_VERSION,
             app: "demo",
-            command: "plan",
+            command: "iap-plan",
             summary: Summary::of(&r.actions),
             actions: &r.actions,
         };
