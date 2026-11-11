@@ -12,6 +12,12 @@ inputs:
   only:
     description: provider を絞る（appstore,googleplay）。空なら全部
     default: ""
+  app-store-version:
+    description: meta-plan / meta-apply で編集する App Store の版（"1.4.0"）。metadata.yaml の appStoreVersion より優先する。空なら YAML のまま
+    default: ""
+  create-app-store-version:
+    description: meta-plan / meta-apply で、その版が無ければ作る（plan は作る予定を表示するだけ）。app-store-version か appStoreVersion が要る
+    default: "false"
   comment:
     description: PR にコメントする（push のときは、その commit の PR に結果を付ける）
     default: "true"
@@ -64,6 +70,8 @@ runs:
         RC_COMMAND: ${{ inputs.command }}
         RC_CONFIG: ${{ inputs.config }}
         RC_ONLY: ${{ inputs.only }}
+        RC_ASC_VERSION: ${{ inputs.app-store-version }}
+        RC_ASC_CREATE: ${{ inputs.create-app-store-version }}
       run: |
         set -uo pipefail
         case "$RC_COMMAND" in
@@ -76,6 +84,12 @@ runs:
         json="$RUNNER_TEMP/releasectl.json"; md="$RUNNER_TEMP/releasectl.md"
         args=("${sub[@]}" --config "$RC_CONFIG" --detailed-exitcode --json-out "$json" --markdown-out "$md")
         [ -n "$RC_ONLY" ] && args+=(--only "$RC_ONLY")
+        if [ "${sub[0]}" = meta ]; then
+          [ -n "$RC_ASC_VERSION" ] && args+=(--app-store-version "$RC_ASC_VERSION")
+          [ "$RC_ASC_CREATE" = true ] && args+=(--create-app-store-version)
+        elif [ -n "$RC_ASC_VERSION" ] || [ "$RC_ASC_CREATE" = true ]; then
+          echo "::error::app-store-version / create-app-store-version は meta-plan / meta-apply でだけ使えます"; exit 1
+        fi
         # 鍵は env のまま CLI に渡す。ここでは触らない・ログに出さない。
         # Actions の bash は -e 付きで起動する。差分あり（2）で止まらないよう終了コードを受け取る。
         code=0

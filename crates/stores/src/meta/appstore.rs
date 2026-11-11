@@ -124,20 +124,50 @@ impl Reconciler for MetaAppStore {
         self.reconcile_price(apply, &app_id, r);
 
         // version: description / keywords / whatsNew / URL / 著作権表示 と審査情報。
-        let (version_id, version_attrs, note) = match self.find_version(&app_id) {
+        let found = match self.find_version(&app_id) {
             Ok(v) => v,
             Err(e) => {
                 r.add("version", bundle, Status::Error, e);
                 return Ok(());
             }
         };
-        let Some(version_id) = version_id else {
-            r.add("version", bundle, Status::Skip, note);
-            return Ok(());
+        let (version_id, version_attrs) = match found {
+            Pick::Found { id, attrs, note } => {
+                if !note.is_empty() {
+                    r.add("version", &self.cfg.app_store_version, Status::Exists, note);
+                }
+                (id, attrs)
+            }
+            Pick::Missing(note) => {
+                r.add("version", bundle, Status::Skip, note);
+                return Ok(());
+            }
+            Pick::Create => {
+                if !apply {
+                    self.plan_new_version(r);
+                    return Ok(());
+                }
+                match self.create_version(&app_id) {
+                    Ok(v) => {
+                        r.add(
+                            "version",
+                            &self.cfg.app_store_version,
+                            Status::Created,
+                            "new",
+                        );
+                        v
+                    }
+                    Err(e) => {
+                        r.add("version", &self.cfg.app_store_version, Status::Error, e);
+                        return Ok(());
+                    }
+                }
+            }
+            Pick::Blocked(note) => {
+                r.add("version", &self.cfg.app_store_version, Status::Error, note);
+                return Ok(());
+            }
         };
-        if !note.is_empty() {
-            r.add("version", &self.cfg.app_store_version, Status::Exists, note);
-        }
 
         self.reconcile_version_localizations(apply, &version_id, r);
         self.reconcile_copyright(apply, &version_id, &version_attrs, r);
@@ -178,9 +208,8 @@ impl MetaAppStore {
             .map(|r| r.id.clone()))
     }
 
-    /// 編集する版: (id, 属性, 補足)。appStoreVersion を指定していれば versionString で、
-    /// 無ければ最初の編集できる版。
-    fn find_version(&self, app_id: &str) -> Result<(Option<String>, Value, String), String> {
+    /// 編集する版を選ぶ。`appStoreVersion` を指定していれば versionString で、無ければ最初の編集できる版。
+    fn find_version(&self, app_id: &str) -> Result<Pick, String> {
         let resp = self.cli.r#do(
             "GET",
             &format!("/v1/apps/{app_id}/appStoreVersions?limit=50"),
@@ -190,30 +219,53 @@ impl MetaAppStore {
             return Err(format!("list versions: {}", resp.error()));
         }
         let (data, _) = parse_list(&resp)?;
-        let want = self.cfg.app_store_version.as_str();
-        for r in data {
-            let state = state_of(&r).to_string();
-            if !want.is_empty() {
-                if attr(&r, "versionString") == want {
-                    let note = if is_editable(&state) {
-                        String::new()
-                    } else {
-                        format!("version state {state} may not be editable")
-                    };
-                    return Ok((Some(r.id), r.attributes, note));
-                }
-                continue;
-            }
-            if is_editable(&state) {
-                return Ok((Some(r.id), r.attributes, String::new()));
-            }
+        Ok(pick_version(
+            &data,
+            &self.cfg.app_store_version,
+            self.cfg.create_app_store_version,
+        ))
+    }
+
+    /// 版を作る（`POST /v1/appStoreVersions`）。作った版の (id, 属性) を返す。
+    fn create_version(&self, app_id: &str) -> Result<(String, Value), String> {
+        let body = version_create_body(app_id, &self.cfg.app_store_version);
+        let resp = self.cli.r#do("POST", "/v1/appStoreVersions", Some(&body))?;
+        if !resp.ok() {
+            return Err(format!("create version: {}", resp.error()));
         }
-        let note = if want.is_empty() {
-            "no editable app version".to_string()
-        } else {
-            format!("version {want} not found (create it in App Store Connect first)")
-        };
-        Ok((None, Value::Null, note))
+        let v: Value = resp.json()?;
+        let id = v
+            .pointer("/data/id")
+            .and_then(Value::as_str)
+            .ok_or("create version: no id in the response")?
+            .to_string();
+        let attrs = v
+            .pointer("/data/attributes")
+            .cloned()
+            .unwrap_or(Value::Null);
+        Ok((id, attrs))
+    }
+
+    /// 版がまだ無い plan: 版の作成と、版の中で作るものを出す。版が無いので読めず、どれも `+` になる。
+    /// スクリーンショット・クリエイティブはローカライズを作った後でないと比べられない（初めてのロケールと同じ）。
+    fn plan_new_version(&self, r: &mut Report) {
+        let want = self.cfg.app_store_version.as_str();
+        r.add("version", want, Status::Create, "new");
+        self.version_localizations_with(false, want, &Locs::new(), r);
+        self.reconcile_copyright(false, want, &Value::Null, r);
+        if self.cfg.review.is_some() {
+            r.add("reviewDetail", want, Status::Create, "new");
+        }
+        if let Some(shots) = &self.cfg.screenshots
+            && !(shots.appstore.is_empty() && shots.creatives.is_empty())
+        {
+            r.add(
+                "screenshot",
+                want,
+                Status::Skip,
+                format!("compared after version {want} is created"),
+            );
+        }
     }
 
     // --- ローカライズ ---
@@ -258,6 +310,16 @@ impl MetaAppStore {
                 return;
             }
         };
+        self.version_localizations_with(apply, version_id, &existing, r);
+    }
+
+    fn version_localizations_with(
+        &self,
+        apply: bool,
+        version_id: &str,
+        existing: &Locs,
+        r: &mut Report,
+    ) {
         for loc in &self.cfg.locales {
             let mut desired = Map::new();
             put_if(&mut desired, "description", &loc.description);
@@ -274,7 +336,7 @@ impl MetaAppStore {
                 apply,
                 "versionLoc",
                 "appStoreVersionLocalizations",
-                &existing,
+                existing,
                 &loc.locale,
                 desired,
                 rel,
@@ -614,6 +676,68 @@ impl MetaAppStore {
     }
 }
 
+/// 編集する版の選び方の結果。
+#[derive(Debug, PartialEq)]
+enum Pick {
+    /// その版を編集する。note は「編集できない状態かもしれない」など
+    Found {
+        id: String,
+        attrs: Value,
+        note: String,
+    },
+    /// 編集する版が無い（skip）
+    Missing(String),
+    /// 指定の版が無く、作る（`--create-app-store-version`）
+    Create,
+    /// 作れない（別の番号の編集できる版がある）
+    Blocked(String),
+}
+
+fn pick_version(data: &[Resource], want: &str, create: bool) -> Pick {
+    let found = |r: &Resource, note: String| Pick::Found {
+        id: r.id.clone(),
+        attrs: r.attributes.clone(),
+        note,
+    };
+    if want.is_empty() {
+        return match data.iter().find(|r| is_editable(state_of(r))) {
+            Some(r) => found(r, String::new()),
+            None => Pick::Missing("no editable app version".into()),
+        };
+    }
+    if let Some(r) = data.iter().find(|r| attr(r, "versionString") == want) {
+        let state = state_of(r);
+        let note = if is_editable(state) {
+            String::new()
+        } else {
+            format!("version state {state} may not be editable")
+        };
+        return found(r, note);
+    }
+    if !create {
+        return Pick::Missing(format!(
+            "version {want} not found (create it in App Store Connect first, or pass --create-app-store-version)"
+        ));
+    }
+    // App Store は編集できる版を同時に 1 つしか持たせない。番号を付け替えるか捨てるかは人が決める。
+    match data.iter().find(|r| is_editable(state_of(r))) {
+        Some(r) => Pick::Blocked(format!(
+            "cannot create version {want}: version {} is still editable ({}); change or remove it in App Store Connect",
+            attr(r, "versionString"),
+            state_of(r)
+        )),
+        None => Pick::Create,
+    }
+}
+
+fn version_create_body(app_id: &str, version: &str) -> Value {
+    json!({"data": {
+        "type": "appStoreVersions",
+        "attributes": {"platform": "IOS", "versionString": version},
+        "relationships": {"app": {"data": {"type": "apps", "id": app_id}}},
+    }})
+}
+
 fn with_dropped(base: &str, dropped: &[String]) -> String {
     if dropped.is_empty() {
         base.to_string()
@@ -647,6 +771,81 @@ mod tests {
         assert_eq!(m["contests"], json!("NONE"));
         assert_eq!(m["gambling"], json!(false));
         assert_eq!(m.len(), 14);
+    }
+
+    fn ver(id: &str, version: &str, state: &str) -> Resource {
+        Resource {
+            id: id.into(),
+            attributes: json!({"versionString": version, "appVersionState": state}),
+        }
+    }
+
+    fn found_id(p: &Pick) -> Option<&str> {
+        match p {
+            Pick::Found { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn pick_first_editable_without_version() {
+        let data = [
+            ver("1", "1.0.0", "READY_FOR_DISTRIBUTION"),
+            ver("2", "1.1.0", "PREPARE_FOR_SUBMISSION"),
+        ];
+        assert_eq!(found_id(&pick_version(&data, "", false)), Some("2"));
+        assert_eq!(
+            pick_version(&data[..1], "", true),
+            Pick::Missing("no editable app version".into())
+        );
+    }
+
+    #[test]
+    fn pick_named_version() {
+        let data = [
+            ver("1", "1.0.0", "READY_FOR_DISTRIBUTION"),
+            ver("2", "1.1.0", "PREPARE_FOR_SUBMISSION"),
+        ];
+        assert_eq!(found_id(&pick_version(&data, "1.1.0", true)), Some("2"));
+        // 編集できない版も試す（注記付き）。作らない
+        match pick_version(&data, "1.0.0", true) {
+            Pick::Found { id, note, .. } => {
+                assert_eq!(id, "1");
+                assert!(note.contains("READY_FOR_DISTRIBUTION"), "{note}");
+            }
+            p => panic!("{p:?}"),
+        }
+    }
+
+    #[test]
+    fn pick_missing_version_creates_only_when_asked() {
+        let live = [ver("1", "1.0.0", "READY_FOR_DISTRIBUTION")];
+        match pick_version(&live, "1.1.0", false) {
+            Pick::Missing(note) => assert!(note.contains("--create-app-store-version"), "{note}"),
+            p => panic!("{p:?}"),
+        }
+        assert_eq!(pick_version(&live, "1.1.0", true), Pick::Create);
+        assert_eq!(pick_version(&[], "1.0.0", true), Pick::Create);
+    }
+
+    #[test]
+    fn pick_blocks_when_another_version_is_editable() {
+        let data = [
+            ver("1", "1.0.0", "READY_FOR_DISTRIBUTION"),
+            ver("2", "1.0.1", "PREPARE_FOR_SUBMISSION"),
+        ];
+        match pick_version(&data, "1.1.0", true) {
+            Pick::Blocked(note) => assert!(note.contains("1.0.1"), "{note}"),
+            p => panic!("{p:?}"),
+        }
+    }
+
+    #[test]
+    fn create_body() {
+        let b = version_create_body("123", "1.4.0");
+        assert_eq!(b["data"]["attributes"]["platform"], "IOS");
+        assert_eq!(b["data"]["attributes"]["versionString"], "1.4.0");
+        assert_eq!(b["data"]["relationships"]["app"]["data"]["id"], "123");
     }
 
     #[test]

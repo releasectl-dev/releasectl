@@ -62,9 +62,21 @@ enum IapCmd {
 #[derive(Subcommand)]
 enum MetaCmd {
     /// apply が何を変えるかを表示する。公開されるものは何も書かない（Play は edit を開いて捨てる）
-    Plan(Args),
+    Plan(MetaArgs),
     /// 掲載情報を書く。冪等で再実行してよい。審査への提出はしない
-    Apply(Args),
+    Apply(MetaArgs),
+}
+
+#[derive(clap::Args)]
+struct MetaArgs {
+    #[command(flatten)]
+    common: Args,
+    /// 編集する App Store の版（"1.4.0"）。metadata.yaml の appStoreVersion より優先する（リリースのタグから渡す）
+    #[arg(long)]
+    app_store_version: Option<String>,
+    /// その版が無ければ作る（apply のとき。plan は作る予定を表示する）。版の番号の指定が要る
+    #[arg(long)]
+    create_app_store_version: bool,
 }
 
 #[derive(clap::Args)]
@@ -144,8 +156,8 @@ fn main() -> ExitCode {
             IapCmd::Retire(a) => run(&a, Kind::Iap, Mode::Retire),
         },
         Top::Meta { command } => match command {
-            MetaCmd::Plan(a) => run(&a, Kind::Meta, Mode::Plan),
-            MetaCmd::Apply(a) => run(&a, Kind::Meta, Mode::Apply),
+            MetaCmd::Plan(a) => run_meta(&a, Mode::Plan),
+            MetaCmd::Apply(a) => run_meta(&a, Mode::Apply),
         },
         Top::Play { command } => match command {
             PlayCmd::UploadPlan(a) => play_upload(&a, false),
@@ -158,8 +170,38 @@ type Build<'a> = Box<dyn Fn() -> Result<Box<dyn Reconciler>, String> + 'a>;
 /// 実行順の provider（名前と、その reconciler の作り方）。
 type Providers = Vec<(&'static str, Build<'static>)>;
 
+/// meta だけのオプション（設定ファイルを上書きする）。
+#[derive(Default)]
+struct MetaOverrides {
+    app_store_version: Option<String>,
+    create_app_store_version: bool,
+}
+
+fn run_meta(a: &MetaArgs, mode: Mode) -> ExitCode {
+    let o = MetaOverrides {
+        app_store_version: a.app_store_version.clone(),
+        create_app_store_version: a.create_app_store_version,
+    };
+    run_with(&a.common, Kind::Meta, mode, &o)
+}
+
+fn apply_overrides(cfg: &mut MetaConfig, o: &MetaOverrides) -> Result<(), String> {
+    if let Some(v) = &o.app_store_version {
+        cfg.app_store_version = v.trim().to_string();
+    }
+    cfg.create_app_store_version = o.create_app_store_version;
+    if cfg.create_app_store_version && cfg.app_store_version.is_empty() {
+        return Err("--create-app-store-version needs a version: pass --app-store-version or set appStoreVersion".into());
+    }
+    Ok(())
+}
+
 /// 設定を読み、(アプリ名, 実行順の provider) を返す。
-fn load(kind: Kind, path: &std::path::Path) -> Result<(String, Providers), String> {
+fn load(
+    kind: Kind,
+    path: &std::path::Path,
+    o: &MetaOverrides,
+) -> Result<(String, Providers), String> {
     match kind {
         Kind::Iap => {
             let cfg = std::rc::Rc::new(Config::load(path).map_err(|e| e.to_string())?);
@@ -174,7 +216,9 @@ fn load(kind: Kind, path: &std::path::Path) -> Result<(String, Providers), Strin
             Ok((app, list))
         }
         Kind::Meta => {
-            let cfg = std::rc::Rc::new(MetaConfig::load(path).map_err(|e| e.to_string())?);
+            let mut cfg = MetaConfig::load(path).map_err(|e| e.to_string())?;
+            apply_overrides(&mut cfg, o)?;
+            let cfg = std::rc::Rc::new(cfg);
             let app = cfg.app_name.clone();
             let list = META_PROVIDERS
                 .iter()
@@ -189,6 +233,10 @@ fn load(kind: Kind, path: &std::path::Path) -> Result<(String, Providers), Strin
 }
 
 fn run(args: &Args, kind: Kind, mode: Mode) -> ExitCode {
+    run_with(args, kind, mode, &MetaOverrides::default())
+}
+
+fn run_with(args: &Args, kind: Kind, mode: Mode, o: &MetaOverrides) -> ExitCode {
     let json = args.output != Output::Text;
     // json / markdown のときは標準出力にそれ 1 つだけを出す。人向けの行はここを通して捨てる。
     let say = |line: String| {
@@ -202,7 +250,7 @@ fn run(args: &Args, kind: Kind, mode: Mode) -> ExitCode {
             Kind::Meta => "metadata.yaml",
         })
     });
-    let (app, providers) = match load(kind, &path) {
+    let (app, providers) = match load(kind, &path, o) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("config: {e}");
@@ -342,5 +390,47 @@ fn play_upload(a: &UploadCli, apply: bool) -> ExitCode {
             eprintln!("error: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(version: &str) -> MetaConfig {
+        let yaml = format!(
+            "appName: t\nbundleId: dev.t\nappStoreVersion: \"{version}\"\nlocales:\n  - {{ locale: ja, name: t }}\n"
+        );
+        MetaConfig::parse(&yaml, "metadata.yaml").expect("parse")
+    }
+
+    #[test]
+    fn flag_overrides_yaml_version() {
+        let mut c = cfg("1.0.0");
+        let o = MetaOverrides {
+            app_store_version: Some(" 1.4.0 ".into()),
+            create_app_store_version: true,
+        };
+        apply_overrides(&mut c, &o).unwrap();
+        assert_eq!(c.app_store_version, "1.4.0");
+        assert!(c.create_app_store_version);
+    }
+
+    #[test]
+    fn yaml_version_is_kept_without_flag() {
+        let mut c = cfg("1.0.0");
+        apply_overrides(&mut c, &MetaOverrides::default()).unwrap();
+        assert_eq!(c.app_store_version, "1.0.0");
+        assert!(!c.create_app_store_version);
+    }
+
+    #[test]
+    fn create_needs_a_version() {
+        let mut c = cfg("");
+        let o = MetaOverrides {
+            app_store_version: None,
+            create_app_store_version: true,
+        };
+        assert!(apply_overrides(&mut c, &o).is_err());
     }
 }

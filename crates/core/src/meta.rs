@@ -17,9 +17,13 @@ pub struct MetaConfig {
     /// Google Play の package name
     #[serde(default)]
     pub package_name: String,
-    /// 編集する App Store の版（"1.0.0"）。空なら編集できる状態の版
+    /// 編集する App Store の版（"1.0.0"）。空なら編集できる状態の版。CLI の `--app-store-version` で上書きする
     #[serde(default)]
     pub app_store_version: String,
+    /// `app_store_version` の版が無ければ作る。YAML には書かず、CLI の `--create-app-store-version` だけで決める
+    /// （打ち間違いで版ができないように、毎回明示させる）
+    #[serde(skip)]
+    pub create_app_store_version: bool,
     /// App Store の審査情報（連絡先・デモ・メモ）
     #[serde(default)]
     pub review: Option<Review>,
