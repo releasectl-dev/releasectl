@@ -60,10 +60,10 @@ pub(super) fn upload_ops(reservation: &Value) -> Vec<UploadOp> {
 }
 
 /// set の中のスクリーンショット 1 枚。
-struct Shot {
+pub(super) struct Shot {
     id: String,
     /// sourceFileChecksum（MD5）。処理中は空
-    checksum: String,
+    pub(super) checksum: String,
     /// assetDeliveryState.state（AWAITING_UPLOAD / UPLOAD_COMPLETE / COMPLETE / FAILED）
     state: String,
 }
@@ -254,7 +254,7 @@ impl MetaAppStore {
     }
 
     /// set の中のスクリーンショット。
-    fn list_screenshots(&self, set_id: &str) -> Result<Vec<Shot>, String> {
+    pub(super) fn list_screenshots(&self, set_id: &str) -> Result<Vec<Shot>, String> {
         Ok(get_all(
             &self.cli,
             &format!("/v1/appScreenshotSets/{set_id}/appScreenshots?limit=50"),

@@ -133,7 +133,7 @@ impl MetaPlay {
     }
 
     /// listing の画像タイプの今の画像の SHA-256。404（listing も画像もまだ無い）は空。
-    fn list_image_shas(&self, base: &str) -> Result<Vec<String>, String> {
+    pub(super) fn list_image_shas(&self, base: &str) -> Result<Vec<String>, String> {
         let resp = self.cli.r#do("GET", base, None)?;
         if resp.status == 404 {
             return Ok(Vec::new());

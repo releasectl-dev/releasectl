@@ -4,8 +4,10 @@
 mod appstore;
 mod appstore_app;
 mod appstore_creatives;
+mod appstore_export;
 mod appstore_shots;
 mod googleplay;
+mod googleplay_export;
 mod googleplay_images;
 
 use crate::Reconciler;

@@ -28,6 +28,10 @@ impl Reconciler for MetaPlay {
         "googleplay"
     }
 
+    fn export(&self, r: &mut Report) -> Result<Value, String> {
+        self.export_store(r)
+    }
+
     fn reconcile(&self, apply: bool, r: &mut Report) -> Result<(), String> {
         // target がパッケージ名だけの op（アプリに 1 つ）は key に target を入れない。
         r.set_key_singleton(&["app", "edit", "details", "commit"]);
@@ -227,7 +231,7 @@ impl MetaPlay {
         true
     }
 
-    fn insert_edit(&self, pkg: &str) -> Result<String, String> {
+    pub(super) fn insert_edit(&self, pkg: &str) -> Result<String, String> {
         let resp = self.cli.r#do(
             "POST",
             &format!("/applications/{pkg}/edits"),

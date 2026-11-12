@@ -4,7 +4,7 @@ author: releasectl-dev
 
 inputs:
   command:
-    description: iap-plan / iap-apply / iap-retire-plan / iap-retire（課金カタログ）、meta-plan / meta-apply（掲載情報）
+    description: iap-plan / iap-apply / iap-retire-plan / iap-retire（課金カタログ）、meta-plan / meta-apply / meta-export（掲載情報。export はストアの今の値を JSON に出すだけ）
     default: iap-plan
   config:
     description: desired-state の YAML（課金カタログは iap.yaml、掲載情報は metadata.yaml など）
@@ -13,7 +13,7 @@ inputs:
     description: provider を絞る（appstore,googleplay）。空なら全部
     default: ""
   app-store-version:
-    description: meta-plan / meta-apply で編集する App Store の版（"1.4.0"）。metadata.yaml の appStoreVersion より優先する。空なら YAML のまま
+    description: meta-plan / meta-apply で編集する App Store の版（"1.4.0"）。metadata.yaml の appStoreVersion より優先する。空なら YAML のまま。meta-export では出す版（"live" か番号）
     default: ""
   create-app-store-version:
     description: meta-plan / meta-apply で、その版が無ければ作る（plan は作る予定を表示するだけ）。app-store-version か appStoreVersion が要る
@@ -76,15 +76,23 @@ runs:
         set -uo pipefail
         case "$RC_COMMAND" in
           iap-plan|iap-apply|iap-retire-plan|iap-retire) sub=(iap "${RC_COMMAND#iap-}") ;;
-          meta-plan|meta-apply) sub=(meta "${RC_COMMAND#meta-}") ;;
+          meta-plan|meta-apply|meta-export) sub=(meta "${RC_COMMAND#meta-}") ;;
           plan|apply|retire-plan|retire)
             echo "::error::command: $RC_COMMAND は v0.6.0 から iap-$RC_COMMAND になりました（meta-plan と同じ書き方）"; exit 1 ;;
           *) echo "::error::unknown command: $RC_COMMAND"; exit 1 ;;
         esac
         json="$RUNNER_TEMP/releasectl.json"; md="$RUNNER_TEMP/releasectl.md"
-        args=("${sub[@]}" --config "$RC_CONFIG" --detailed-exitcode --json-out "$json" --markdown-out "$md")
+        if [ "$RC_COMMAND" = meta-export ]; then
+          # ストアの今の値を JSON に出すだけ（差分も Markdown も無い。Cloud に送る用）
+          [ "$RC_ASC_CREATE" = true ] && { echo "::error::create-app-store-version は meta-export では使えません"; exit 1; }
+          args=("${sub[@]}" --config "$RC_CONFIG" --json-out "$json")
+        else
+          args=("${sub[@]}" --config "$RC_CONFIG" --detailed-exitcode --json-out "$json" --markdown-out "$md")
+        fi
         [ -n "$RC_ONLY" ] && args+=(--only "$RC_ONLY")
-        if [ "${sub[0]}" = meta ]; then
+        if [ "$RC_COMMAND" = meta-export ]; then
+          [ -n "$RC_ASC_VERSION" ] && args+=(--app-store-version "$RC_ASC_VERSION")
+        elif [ "${sub[0]}" = meta ]; then
           [ -n "$RC_ASC_VERSION" ] && args+=(--app-store-version "$RC_ASC_VERSION")
           [ "$RC_ASC_CREATE" = true ] && args+=(--create-app-store-version)
         elif [ -n "$RC_ASC_VERSION" ] || [ "$RC_ASC_CREATE" = true ]; then
@@ -93,12 +101,16 @@ runs:
         # 鍵は env のまま CLI に渡す。ここでは触らない・ログに出さない。
         # Actions の bash は -e 付きで起動する。差分あり（2）で止まらないよう終了コードを受け取る。
         code=0
-        releasectl "${args[@]}" || code=$?
+        if [ "$RC_COMMAND" = meta-export ]; then
+          releasectl "${args[@]}" > /dev/null || code=$?
+        else
+          releasectl "${args[@]}" || code=$?
+        fi
         [ -f "$md" ] && cat "$md" >> "$GITHUB_STEP_SUMMARY"
         echo "exitcode=$code" >> "$GITHUB_OUTPUT"
         echo "has-changes=$([ "$code" = 2 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
         echo "json=$json" >> "$GITHUB_OUTPUT"
-        echo "markdown=$md" >> "$GITHUB_OUTPUT"
+        [ -f "$md" ] && echo "markdown=$md" >> "$GITHUB_OUTPUT"
         # 差分あり（2）は成功。エラー（1）だけ失敗にする。コメントは失敗しても付けたいので後で落とす。
         exit 0
 

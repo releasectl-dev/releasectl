@@ -110,6 +110,13 @@ pub fn content_rights_value(v: &str) -> Option<&'static str> {
     }
 }
 
+/// ASC の enum → コンテンツの権利の yaml の値（`meta export` 用。content_rights_value の逆）。
+pub fn content_rights_yaml(api: &str) -> Option<&'static str> {
+    ["none", "thirdParty"]
+        .into_iter()
+        .find(|y| content_rights_value(y) == Some(api))
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlayContact {
@@ -379,6 +386,17 @@ impl MetaConfig {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn content_rights_round_trip() {
+        for y in ["none", "thirdParty"] {
+            assert_eq!(
+                content_rights_yaml(content_rights_value(y).unwrap()),
+                Some(y)
+            );
+        }
+        assert_eq!(content_rights_yaml("SOMETHING_NEW"), None);
+    }
     use super::*;
 
     const BASE: &str = r#"

@@ -34,7 +34,7 @@ const EDITABLE_STATES: [&str; 5] = [
     "INVALID_BINARY",
 ];
 
-fn is_editable(state: &str) -> bool {
+pub(super) fn is_editable(state: &str) -> bool {
     EDITABLE_STATES.contains(&state)
 }
 
@@ -85,6 +85,10 @@ fn age_rating_none() -> Map<String, Value> {
 impl Reconciler for MetaAppStore {
     fn name(&self) -> &'static str {
         "appstore"
+    }
+
+    fn export(&self, r: &mut Report) -> Result<Value, String> {
+        self.export_store(r)
     }
 
     fn reconcile(&self, apply: bool, r: &mut Report) -> Result<(), String> {
@@ -195,7 +199,7 @@ impl Reconciler for MetaAppStore {
 }
 
 impl MetaAppStore {
-    fn find_app_id(&self) -> Result<Option<String>, String> {
+    pub(super) fn find_app_id(&self) -> Result<Option<String>, String> {
         let resp = self.cli.r#do(
             "GET",
             &format!("/v1/apps?filter[bundleId]={}", self.cfg.bundle_id),
@@ -373,7 +377,7 @@ impl MetaAppStore {
         ))
     }
 
-    fn list_localizations(&self, path: &str) -> Result<Locs, String> {
+    pub(super) fn list_localizations(&self, path: &str) -> Result<Locs, String> {
         Ok(get_all(&self.cli, path, "list localizations")?
             .into_iter()
             .filter(|r| !attr(r, "locale").is_empty())

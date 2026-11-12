@@ -65,6 +65,24 @@ enum MetaCmd {
     Plan(MetaArgs),
     /// 掲載情報を書く。冪等で再実行してよい。審査への提出はしない
     Apply(MetaArgs),
+    /// ストアの今の掲載情報を JSON で出す（読むだけ。Play は edit を開いて捨てる）
+    Export(ExportArgs),
+}
+
+#[derive(clap::Args)]
+struct ExportArgs {
+    /// どのアプリかを知るために読む metadata.yaml（希望値は使わない）
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+    /// 実行する provider をカンマ区切りで絞る（appstore,googleplay）
+    #[arg(long, value_delimiter = ',')]
+    only: Vec<String>,
+    /// 出す App Store の版: "live"（販売中）か番号。省くと編集できる版、無ければ販売中の版
+    #[arg(long)]
+    app_store_version: Option<String>,
+    /// JSON をこのファイルにも書く
+    #[arg(long)]
+    json_out: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -158,6 +176,7 @@ fn main() -> ExitCode {
         Top::Meta { command } => match command {
             MetaCmd::Plan(a) => run_meta(&a, Mode::Plan),
             MetaCmd::Apply(a) => run_meta(&a, Mode::Apply),
+            MetaCmd::Export(a) => meta_export(&a),
         },
         Top::Play { command } => match command {
             PlayCmd::UploadPlan(a) => play_upload(&a, false),
@@ -386,6 +405,97 @@ fn run_with(args: &Args, kind: Kind, mode: Mode, o: &MetaOverrides) -> ExitCode 
         }
     }
     ExitCode::from(exit_code(&all, had_fatal, args.detailed_exitcode))
+}
+
+/// `releasectl meta export`（docs: 02_cli-architecture/07-export.md）。標準出力に JSON を 1 つだけ出す。
+fn meta_export(a: &ExportArgs) -> ExitCode {
+    let path = a
+        .config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("metadata.yaml"));
+    let mut cfg = match MetaConfig::load(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("config: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Some(v) = &a.app_store_version {
+        cfg.app_store_version = v.trim().to_string();
+    }
+    let selected: HashSet<&str> = a
+        .only
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut stores = config_stores(&cfg.bundle_id, &cfg.package_name);
+    let mut values = serde_json::Map::new();
+    let mut errors: Vec<Action> = Vec::new();
+    let mut skipped: Vec<Action> = Vec::new();
+    let mut app_store_version = None;
+    let mut had_fatal = false;
+    for (name, build) in META_PROVIDERS {
+        if !selected.is_empty() && !selected.contains(name) {
+            continue;
+        }
+        let mut report = Report::new(name);
+        match build(&cfg) {
+            Err(reason) => report.add("provider", "", Status::Skip, reason),
+            Ok(rec) => match rec.export(&mut report) {
+                Ok(v) if !v.is_null() => {
+                    values.insert(name.to_string(), v);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    had_fatal = true;
+                    report.add("provider", "", Status::Error, e);
+                }
+            },
+        }
+        if !report.store_ids.is_empty() {
+            stores.entry(name).or_default().extend(report.store_ids);
+        }
+        if report.app_store_version.is_some() {
+            app_store_version = report.app_store_version;
+        }
+        for x in report.actions {
+            match x.status {
+                Status::Error => errors.push(x),
+                Status::Skip => skipped.push(x),
+                _ => {}
+            }
+        }
+    }
+
+    let has_error = had_fatal || !errors.is_empty();
+    let mut doc = serde_json::json!({
+        "version": JSON_VERSION,
+        "command": "meta-export",
+        "releasectl_version": env!("CARGO_PKG_VERSION"),
+        "app": cfg.app_name,
+        "stores": stores,
+    });
+    if let Some(v) = app_store_version {
+        doc["appStoreVersion"] =
+            serde_json::json!({"versionString": v.version_string, "state": v.state});
+    }
+    for (k, v) in values {
+        doc[k] = v;
+    }
+    // 読めなかった項目（値は出さない。「無い」とはみなさない）と、流さなかった provider（鍵が無いなど）
+    doc["errors"] = serde_json::to_value(&errors).expect("serialize errors");
+    doc["skipped"] = serde_json::to_value(&skipped).expect("serialize skipped");
+    let text = serde_json::to_string_pretty(&doc).expect("serialize export");
+    println!("{text}");
+    if let Some(p) = &a.json_out
+        && let Err(e) = std::fs::write(p, &text)
+    {
+        eprintln!("write {}: {e}", p.display());
+        return ExitCode::from(1);
+    }
+    ExitCode::from(if has_error { 1 } else { 0 })
 }
 
 fn print_actions(report: &Report) {

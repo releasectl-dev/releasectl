@@ -22,6 +22,11 @@ pub trait Reconciler {
     fn retire(&self, _apply: bool, _report: &mut Report) -> Result<(), String> {
         Err(format!("{}: retire is not supported here", self.name()))
     }
+    /// ストアの今の値を JSON で返す（読むだけ。`releasectl meta export`）。項目ごとの読み取りの失敗は
+    /// `Status::Error` として report に積み、その値は出さない（「無い」とはみなさない）。
+    fn export(&self, _report: &mut Report) -> Result<serde_json::Value, String> {
+        Err(format!("{}: export is not supported here", self.name()))
+    }
 }
 
 /// 鍵が無いときは `Err(理由)` を返し、呼び出し側はその provider を飛ばす。
