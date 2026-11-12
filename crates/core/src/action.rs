@@ -2,6 +2,7 @@
 //! （docs/02_cli-architecture/03-output.md）の両方の元になる。鍵や認証情報はここに入れない。
 
 use serde::Serialize;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// 1 つの希望項目を reconcile した結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -88,9 +89,36 @@ impl Status {
     }
 }
 
+/// 金額（JSON v2 の `current_value` / `desired_value`）。小数の誤差を避けるため amount は文字列。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Money {
+    pub currency: String,
+    pub amount: String,
+}
+
+impl Money {
+    /// 表示用の値（"USD 4.99"）から読む。金額でなければ None（"INACTIVE"、"base 1.99" など）。
+    pub fn parse(s: &str) -> Option<Money> {
+        let (cur, amount) = s.split_once(' ')?;
+        let is_amount = !amount.is_empty()
+            && amount.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && amount.chars().filter(|c| *c == '.').count() <= 1
+            && amount.chars().next().is_some_and(|c| c.is_ascii_digit());
+        (cur.len() == 3 && cur.chars().all(|c| c.is_ascii_uppercase()) && is_amount).then(|| {
+            Money {
+                currency: cur.to_string(),
+                amount: amount.to_string(),
+            }
+        })
+    }
+}
+
 /// plan / apply の報告の 1 行。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Action {
+    /// 項目を一意に指す固定の識別子（JSON v2）。`provider/op[/親]/target[/副キー]`。Cloud の履歴はこれに乗るので、
+    /// 一度決めた形は変えない（docs/02_cli-architecture/03-output.md）
+    pub key: String,
     /// "appstore" | "googleplay"
     pub provider: &'static str,
     /// 短い動詞（"subscription"、"basePlan.price" など）。provider 全体の skip / error は "provider"
@@ -105,6 +133,12 @@ pub struct Action {
     /// drift / update のときの希望値
     #[serde(skip_serializing_if = "Option::is_none")]
     pub desired: Option<String>,
+    /// `current` が金額なら構造で（JSON v2）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_value: Option<Money>,
+    /// `desired` が金額なら構造で（JSON v2）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desired_value: Option<Money>,
     /// 人間向けの補足（エラー文など）
     #[serde(skip_serializing_if = "String::is_empty")]
     pub detail: String,
@@ -122,11 +156,31 @@ impl Action {
     }
 }
 
+/// meta の App Store で対象にした版（JSON v2 の `appStoreVersion`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppStoreVersion {
+    pub version_string: String,
+    pub state: String,
+    /// この実行で作った
+    pub created: bool,
+}
+
 /// provider が Action を積むための小さな入れ物。
 #[derive(Debug)]
 pub struct Report {
     provider: &'static str,
     pub actions: Vec<Action>,
+    /// ストアの ID（JSON v2 の `stores.<provider>`。例 "appId"）。読めたものだけ
+    pub store_ids: BTreeMap<String, String>,
+    /// meta の App Store で対象にした版
+    pub app_store_version: Option<AppStoreVersion>,
+    /// op ごとに key に入れる親（Play の base plan の ID はサブスクの中でだけ一意）
+    key_parent: HashMap<String, String>,
+    /// op ごとに key の末尾に足す副キー（価格のテリトリ / リージョン）
+    key_suffix: HashMap<String, String>,
+    /// key に target を入れない op（target が API の内部 ID で、アプリ / 版に 1 つしかないもの）
+    key_singleton: HashSet<String>,
 }
 
 impl Report {
@@ -134,7 +188,59 @@ impl Report {
         Report {
             provider,
             actions: Vec::new(),
+            store_ids: BTreeMap::new(),
+            app_store_version: None,
+            key_parent: HashMap::new(),
+            key_suffix: HashMap::new(),
+            key_singleton: HashSet::new(),
         }
+    }
+
+    /// 続けて積むその op の行の key に親を入れる（None で外す）。
+    pub fn set_key_parent(&mut self, ops: &[&str], parent: Option<&str>) {
+        for op in ops {
+            match parent {
+                Some(p) => self.key_parent.insert(op.to_string(), p.to_string()),
+                None => self.key_parent.remove(*op),
+            };
+        }
+    }
+
+    /// その op の key の末尾に副キーを足す（例: App Store の price にテリトリ）。
+    pub fn set_key_suffix(&mut self, op: &str, suffix: &str) {
+        self.key_suffix.insert(op.to_string(), suffix.to_string());
+    }
+
+    /// その op の key に target を入れない。
+    pub fn set_key_singleton(&mut self, ops: &[&str]) {
+        self.key_singleton.extend(ops.iter().map(|s| s.to_string()));
+    }
+
+    pub fn store_id(&mut self, name: &str, value: &str) {
+        if !value.is_empty() {
+            self.store_ids.insert(name.to_string(), value.to_string());
+        }
+    }
+
+    fn key(&self, op: &str, target: &str) -> String {
+        let mut parts = vec![self.provider.to_string(), op.to_string()];
+        if !self.key_singleton.contains(op) && !target.is_empty() {
+            if let Some(p) = self.key_parent.get(op) {
+                parts.push(p.clone());
+            }
+            // "dev.x.monthly [en-US]"（App Store のローカライズの表示）→ "dev.x.monthly/en-US"
+            match target.strip_suffix(']').and_then(|t| t.split_once(" [")) {
+                Some((id, loc)) => {
+                    parts.push(id.to_string());
+                    parts.push(loc.to_string());
+                }
+                None => parts.push(target.to_string()),
+            }
+        }
+        if let Some(sfx) = self.key_suffix.get(op).filter(|s| !s.is_empty()) {
+            parts.push(sfx.clone());
+        }
+        parts.join("/")
     }
 
     pub fn add(&mut self, op: &str, target: &str, status: Status, detail: impl Into<String>) {
@@ -185,10 +291,13 @@ impl Report {
         desired: Option<String>,
     ) {
         self.actions.push(Action {
+            key: self.key(op, target),
             provider: self.provider,
             op: op.to_string(),
             target: target.to_string(),
             status,
+            current_value: current.as_deref().and_then(Money::parse),
+            desired_value: desired.as_deref().and_then(Money::parse),
             current,
             desired,
             detail,
@@ -205,14 +314,23 @@ impl Report {
 pub struct RunReport<'a> {
     /// JSON の形の版。互換の無い変更をしたら上げる
     pub version: u32,
+    /// CLI のバージョン（v2）
+    pub releasectl_version: &'a str,
     pub app: &'a str,
     /// "iap-plan" | "iap-apply" | "iap-retire-plan" | "iap-retire" | "meta-plan" | "meta-apply"（GitHub Action の command と同じ）
     pub command: &'a str,
+    /// ストアの ID（v2）。provider → {"bundleId" / "appId" / "packageName"}。Cloud はアプリをこれで見分ける
+    pub stores: BTreeMap<&'static str, BTreeMap<String, String>>,
+    /// meta の App Store で対象にした版（v2）。App Store を流さなかったときは出さない
+    #[serde(rename = "appStoreVersion", skip_serializing_if = "Option::is_none")]
+    pub app_store_version: Option<AppStoreVersion>,
     pub summary: Summary,
     pub actions: &'a [Action],
 }
 
-pub const JSON_VERSION: u32 = 1;
+/// v2（2026-11-12）: releasectl_version・stores・appStoreVersion・Action の key・current_value / desired_value を足した。
+/// v1 の項目はそのまま。
+pub const JSON_VERSION: u32 = 2;
 
 /// status ごとの件数（0 件の status も出す。並びは Status::ALL）。
 #[derive(Debug, PartialEq, Eq)]
@@ -283,13 +401,22 @@ mod tests {
         r.add("group", "Pro", Status::Exists, "");
         let rep = RunReport {
             version: JSON_VERSION,
+            releasectl_version: "0.7.0",
             app: "demo",
             command: "iap-plan",
+            stores: BTreeMap::new(),
+            app_store_version: None,
             summary: Summary::of(&r.actions),
             actions: &r.actions,
         };
         let v = serde_json::to_value(&rep).unwrap();
-        assert_eq!(v["version"], 1);
+        assert_eq!(v["version"], 2);
+        assert_eq!(v["releasectl_version"], "0.7.0");
+        assert!(v.get("appStoreVersion").is_none());
+        assert_eq!(v["actions"][0]["key"], "appstore/price/a.monthly");
+        assert_eq!(v["actions"][0]["current_value"]["amount"], "1.99");
+        assert_eq!(v["actions"][0]["desired_value"]["currency"], "USD");
+        assert!(v["actions"][1].get("current_value").is_none());
         assert_eq!(v["summary"]["drift"], 1);
         assert_eq!(v["summary"]["exists"], 1);
         assert_eq!(v["summary"]["error"], 0);
@@ -302,6 +429,58 @@ mod tests {
         // summary の並びは Status::ALL
         let keys: Vec<_> = v["summary"].as_object().unwrap().keys().cloned().collect();
         assert_eq!(keys.len(), Status::ALL.len());
+    }
+
+    #[test]
+    fn keys() {
+        let mut r = Report::new("appstore");
+        r.set_key_suffix("price", "USA");
+        r.set_key_singleton(&["copyright"]);
+        r.add("price", "dev.x.monthly", Status::Exists, "");
+        r.add("localization", "dev.x.monthly [en-US]", Status::Exists, "");
+        r.add("copyright", "80e3526a-version-id", Status::Exists, "");
+        r.add("provider", "", Status::Skip, "no keys");
+        let keys: Vec<_> = r.actions.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "appstore/price/dev.x.monthly/USA",
+                "appstore/localization/dev.x.monthly/en-US",
+                "appstore/copyright",
+                "appstore/provider",
+            ]
+        );
+
+        let mut g = Report::new("googleplay");
+        g.set_key_parent(&["basePlan.price"], Some("pro_monthly"));
+        g.add("subscription", "pro_monthly", Status::Exists, "");
+        g.add("basePlan.price", "monthly", Status::Exists, "");
+        g.set_key_parent(&["basePlan.price"], None);
+        g.add("subscription", "pro_yearly", Status::Exists, "");
+        assert_eq!(g.actions[0].key, "googleplay/subscription/pro_monthly");
+        assert_eq!(
+            g.actions[1].key,
+            "googleplay/basePlan.price/pro_monthly/monthly"
+        );
+        assert_eq!(g.actions[2].key, "googleplay/subscription/pro_yearly");
+    }
+
+    #[test]
+    fn money() {
+        let m = Money::parse("USD 4.99").unwrap();
+        assert_eq!((m.currency.as_str(), m.amount.as_str()), ("USD", "4.99"));
+        assert_eq!(Money::parse("JPY 300").unwrap().amount, "300");
+        for s in [
+            "INACTIVE",
+            "base 1.99",
+            "USD",
+            "USD .5",
+            "USD 1.2.3",
+            "usd 1",
+            "USD 4.99→5.99",
+        ] {
+            assert_eq!(Money::parse(s), None, "{s}");
+        }
     }
 
     #[test]

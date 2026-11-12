@@ -29,7 +29,10 @@ impl Reconciler for MetaPlay {
     }
 
     fn reconcile(&self, apply: bool, r: &mut Report) -> Result<(), String> {
+        // target がパッケージ名だけの op（アプリに 1 つ）は key に target を入れない。
+        r.set_key_singleton(&["app", "edit", "details", "commit"]);
         let pkg = self.cfg.package_name.as_str();
+        r.store_id("packageName", pkg);
         if pkg.is_empty() {
             r.add(
                 "app",

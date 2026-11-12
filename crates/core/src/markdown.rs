@@ -110,8 +110,11 @@ mod tests {
     fn rep<'a>(command: &'a str, actions: &'a [Action]) -> RunReport<'a> {
         RunReport {
             version: JSON_VERSION,
+            releasectl_version: "0.0.0",
             app: "demo",
             command,
+            stores: Default::default(),
+            app_store_version: None,
             summary: Summary::of(actions),
             actions,
         }

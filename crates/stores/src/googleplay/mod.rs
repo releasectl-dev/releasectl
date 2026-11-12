@@ -20,6 +20,14 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// key にサブスクの ID（親）を入れる op（JSON v2 の key）。
+pub(super) const BASE_PLAN_OPS: [&str; 4] = [
+    "basePlan",
+    "basePlan.activate",
+    "basePlan.price",
+    "basePlan.deactivate",
+];
+
 const API_BASE: &str = "https://androidpublisher.googleapis.com/androidpublisher/v3";
 /// 現行の Google Play regions version
 const REGIONS_VERSION: &str = "2025/03";
@@ -223,6 +231,8 @@ impl Reconciler for Play {
         }
         let region = self.cfg.pricing.region.as_str();
         let currency = self.cfg.pricing.currency.as_str();
+        r.store_id("packageName", pkg);
+        r.set_key_suffix("basePlan.price", region);
 
         for prod in &self.cfg.products {
             if prod.play_product_id.is_empty() {
@@ -234,6 +244,8 @@ impl Reconciler for Play {
             }
             let pid = prod.play_product_id.as_str();
             let bpid = prod.play_base_plan_id.as_str();
+            // base plan の ID はサブスクの中でだけ一意なので、key にサブスクの ID を入れる。
+            r.set_key_parent(&BASE_PLAN_OPS, Some(pid));
             let sub = match self.get_subscription(pkg, pid) {
                 Ok(s) => s,
                 Err(e) => {

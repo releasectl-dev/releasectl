@@ -6,5 +6,7 @@ pub mod config;
 pub mod markdown;
 pub mod meta;
 
-pub use action::{Action, JSON_VERSION, Report, RunReport, Status, Summary, exit_code};
+pub use action::{
+    Action, AppStoreVersion, JSON_VERSION, Money, Report, RunReport, Status, Summary, exit_code,
+};
 pub use config::{Config, ConfigError, Product};

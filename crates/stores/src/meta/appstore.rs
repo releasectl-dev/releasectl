@@ -7,7 +7,7 @@ use crate::Reconciler;
 use crate::appstore::{Resource, attr, created_id, get_all, parse_list};
 use crate::http::{Client, Response};
 use releasectl_core::meta::MetaConfig;
-use releasectl_core::{Report, Status};
+use releasectl_core::{AppStoreVersion, Report, Status};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 
@@ -88,6 +88,19 @@ impl Reconciler for MetaAppStore {
     }
 
     fn reconcile(&self, apply: bool, r: &mut Report) -> Result<(), String> {
+        // target が API の内部 ID（appInfo / 版の ID）で、アプリか版に 1 つしかない op は key に target を入れない。
+        // どの版かは JSON の appStoreVersion で分かる。
+        r.set_key_singleton(&[
+            "app",
+            "appInfo",
+            "ageRating",
+            "contentRights",
+            "price",
+            "copyright",
+            "reviewDetail",
+            "version",
+            "screenshots",
+        ]);
         let bundle = self.cfg.bundle_id.as_str();
         if bundle.is_empty() {
             r.add("app", &self.cfg.app_name, Status::Skip, "bundleId not set");
@@ -102,6 +115,7 @@ impl Reconciler for MetaAppStore {
             );
             return Ok(());
         };
+        r.store_id("appId", &app_id);
 
         // appInfo: name / subtitle / privacyPolicyUrl と、年齢区分（appInfo にぶら下がる）。
         let app_info = match self.find_editable_app_info(&app_id) {
@@ -133,6 +147,7 @@ impl Reconciler for MetaAppStore {
         };
         let (version_id, version_attrs) = match found {
             Pick::Found { id, attrs, note } => {
+                r.app_store_version = Some(version_info(&attrs, false));
                 if !note.is_empty() {
                     r.add("version", &self.cfg.app_store_version, Status::Exists, note);
                 }
@@ -155,6 +170,7 @@ impl Reconciler for MetaAppStore {
                             Status::Created,
                             "new",
                         );
+                        r.app_store_version = Some(version_info(&v.1, true));
                         v
                     }
                     Err(e) => {
@@ -250,6 +266,12 @@ impl MetaAppStore {
     /// スクリーンショット・クリエイティブはローカライズを作った後でないと比べられない（初めてのロケールと同じ）。
     fn plan_new_version(&self, r: &mut Report) {
         let want = self.cfg.app_store_version.as_str();
+        // まだ無い版。state は空（plan で作る予定）。
+        r.app_store_version = Some(AppStoreVersion {
+            version_string: want.to_string(),
+            state: String::new(),
+            created: false,
+        });
         r.add("version", want, Status::Create, "new");
         self.version_localizations_with(false, want, &Locs::new(), r);
         self.reconcile_copyright(false, want, &Value::Null, r);
@@ -727,6 +749,21 @@ fn pick_version(data: &[Resource], want: &str, create: bool) -> Pick {
             state_of(r)
         )),
         None => Pick::Create,
+    }
+}
+
+/// JSON の appStoreVersion（対象にした版）。
+fn version_info(attrs: &Value, created: bool) -> AppStoreVersion {
+    let get = |k: &str| attrs.get(k).and_then(Value::as_str).unwrap_or("");
+    let state = ["appStoreState", "state", "appVersionState"]
+        .iter()
+        .map(|k| get(k))
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
+    AppStoreVersion {
+        version_string: get("versionString").to_string(),
+        state: state.to_string(),
+        created,
     }
 }
 

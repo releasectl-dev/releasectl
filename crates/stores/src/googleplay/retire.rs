@@ -25,6 +25,7 @@ impl Play {
                 continue;
             }
             let bpid = prod.play_base_plan_id.as_str();
+            r.set_key_parent(&super::BASE_PLAN_OPS, Some(pid));
             let sub = match self.get_subscription(pkg, pid) {
                 Ok(Some(s)) => s,
                 Ok(None) => {

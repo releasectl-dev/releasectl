@@ -166,6 +166,8 @@ impl Reconciler for AppStore {
     }
 
     fn reconcile(&self, apply: bool, r: &mut Report) -> Result<(), String> {
+        r.set_key_suffix("price", &self.cfg.pricing.territory);
+        r.set_key_singleton(&["app"]);
         // 1. bundle id から app id を引く。
         let Some(app_id) = self.find_app_id()? else {
             r.add(
@@ -176,6 +178,7 @@ impl Reconciler for AppStore {
             );
             return Ok(());
         };
+        r.store_id("appId", &app_id);
 
         // サブスクはグループの流れ、非消費型（買い切り）は in-app purchase v2 の流れ。
         let (one_times, subs): (Vec<&Product>, Vec<&Product>) = self

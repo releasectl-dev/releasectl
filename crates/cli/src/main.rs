@@ -12,7 +12,7 @@ use releasectl_core::{
 use releasectl_stores::googleplay::upload::{UploadArgs, upload};
 use releasectl_stores::meta::META_PROVIDERS;
 use releasectl_stores::{PROVIDERS, Reconciler};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -169,6 +169,24 @@ fn main() -> ExitCode {
 type Build<'a> = Box<dyn Fn() -> Result<Box<dyn Reconciler>, String> + 'a>;
 /// 実行順の provider（名前と、その reconciler の作り方）。
 type Providers = Vec<(&'static str, Build<'static>)>;
+/// JSON v2 の stores（provider → ストアの ID）。
+type Stores = BTreeMap<&'static str, BTreeMap<String, String>>;
+
+/// 設定に書いてあるストアの ID（provider を流さなかったときも出す。Cloud はアプリをこれで見分ける）。
+fn config_stores(bundle_id: &str, package_name: &str) -> Stores {
+    let mut s = Stores::new();
+    if !bundle_id.is_empty() {
+        s.entry("appstore")
+            .or_default()
+            .insert("bundleId".into(), bundle_id.into());
+    }
+    if !package_name.is_empty() {
+        s.entry("googleplay")
+            .or_default()
+            .insert("packageName".into(), package_name.into());
+    }
+    s
+}
 
 /// meta だけのオプション（設定ファイルを上書きする）。
 #[derive(Default)]
@@ -196,16 +214,17 @@ fn apply_overrides(cfg: &mut MetaConfig, o: &MetaOverrides) -> Result<(), String
     Ok(())
 }
 
-/// 設定を読み、(アプリ名, 実行順の provider) を返す。
+/// 設定を読み、(アプリ名, 実行順の provider, 設定にあるストアの ID) を返す。
 fn load(
     kind: Kind,
     path: &std::path::Path,
     o: &MetaOverrides,
-) -> Result<(String, Providers), String> {
+) -> Result<(String, Providers, Stores), String> {
     match kind {
         Kind::Iap => {
             let cfg = std::rc::Rc::new(Config::load(path).map_err(|e| e.to_string())?);
             let app = cfg.app_name.clone();
+            let stores = config_stores(&cfg.bundle_id, &cfg.package_name);
             let list = PROVIDERS
                 .iter()
                 .map(|(name, build)| {
@@ -213,13 +232,14 @@ fn load(
                     (*name, Box::new(move || build(&cfg)) as Build)
                 })
                 .collect();
-            Ok((app, list))
+            Ok((app, list, stores))
         }
         Kind::Meta => {
             let mut cfg = MetaConfig::load(path).map_err(|e| e.to_string())?;
             apply_overrides(&mut cfg, o)?;
             let cfg = std::rc::Rc::new(cfg);
             let app = cfg.app_name.clone();
+            let stores = config_stores(&cfg.bundle_id, &cfg.package_name);
             let list = META_PROVIDERS
                 .iter()
                 .map(|(name, build)| {
@@ -227,7 +247,7 @@ fn load(
                     (*name, Box::new(move || build(&cfg)) as Build)
                 })
                 .collect();
-            Ok((app, list))
+            Ok((app, list, stores))
         }
     }
 }
@@ -250,7 +270,7 @@ fn run_with(args: &Args, kind: Kind, mode: Mode, o: &MetaOverrides) -> ExitCode 
             Kind::Meta => "metadata.yaml",
         })
     });
-    let (app, providers) = match load(kind, &path, o) {
+    let (app, providers, mut stores) = match load(kind, &path, o) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("config: {e}");
@@ -281,6 +301,7 @@ fn run_with(args: &Args, kind: Kind, mode: Mode, o: &MetaOverrides) -> ExitCode 
     let apply = matches!(mode, Mode::Apply | Mode::Retire);
 
     let mut all: Vec<Action> = Vec::new();
+    let mut app_store_version = None;
     let mut had_fatal = false;
     for (name, build) in &providers {
         if selected.as_ref().is_some_and(|s| !s.contains(name)) {
@@ -309,6 +330,12 @@ fn run_with(args: &Args, kind: Kind, mode: Mode, o: &MetaOverrides) -> ExitCode 
             had_fatal = true;
             report.add("provider", "", Status::Error, e);
         }
+        if !report.store_ids.is_empty() {
+            stores.entry(name).or_default().extend(report.store_ids);
+        }
+        if report.app_store_version.is_some() {
+            app_store_version = report.app_store_version;
+        }
         all.extend(report.actions);
     }
 
@@ -327,7 +354,10 @@ fn run_with(args: &Args, kind: Kind, mode: Mode, o: &MetaOverrides) -> ExitCode 
     if json || args.json_out.is_some() || args.markdown_out.is_some() {
         let rep = RunReport {
             version: JSON_VERSION,
+            releasectl_version: env!("CARGO_PKG_VERSION"),
             app,
+            stores,
+            app_store_version,
             command: match (kind, mode) {
                 (Kind::Meta, Mode::Plan) => "meta-plan",
                 (Kind::Meta, _) => "meta-apply",
