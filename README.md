@@ -44,7 +44,7 @@ The code is split so this is easy to check:
 releasectl is a single binary. Build it from a tagged release with Cargo (Rust 1.85 or newer):
 
 ```bash
-cargo install --locked --git https://github.com/releasectl-dev/releasectl --tag v0.9.0 releasectl
+cargo install --locked --git https://github.com/releasectl-dev/releasectl --tag v0.9.1 releasectl
 releasectl --version
 ```
 
@@ -146,7 +146,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: releasectl-dev/releasectl@v0.9.0
+      - uses: releasectl-dev/releasectl@v0.9.1
         with:
           command: ${{ github.event_name == 'pull_request' && 'iap-plan' || 'iap-apply' }}
           config: iap.yaml
