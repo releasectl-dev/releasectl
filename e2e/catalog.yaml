@@ -7,10 +7,6 @@ appName: releasectl-e2e
 bundleId: dev.releasectl.e2e
 packageName: dev.releasectl.e2e
 
-# Go 版 iapctl が必須にしている RevenueCat 用のキー（パリティのためだけ。Rust 版は無視する）
-entitlement:
-  key: e2e
-
 pricing:
   territory: USA
   region: US

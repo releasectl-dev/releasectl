@@ -1,10 +1,7 @@
 //! `iap.yaml`（desired-state）の読み込みと検証。
 //!
 //! 1 枚のファイルで課金カタログ全体を書き、各ストアの reconciler は自分が使う
-//! フィールドだけを読む。Go 版 `internal/config` と同じ形・同じ検証。
-//! Go 版にあった `entitlement` / `revenuecat` / `rcPackage` は RevenueCat 用で、
-//! Rust 版は RevenueCat を扱わない（2026-11-09）。既存の iap.yaml をそのまま
-//! 読めるよう、キーとしては受け付けて無視する。
+//! フィールドだけを読む。知らないキーはエラーにする（打ち間違いを黙って無視しない）。
 
 use serde::Deserialize;
 use std::path::Path;
@@ -34,23 +31,13 @@ pub struct Config {
     /// Google Play の package name
     #[serde(default)]
     pub package_name: String,
-    /// RevenueCat 用（Rust 版では使わない）
-    #[serde(default)]
-    pub entitlement: Option<Ignored>,
     #[serde(default)]
     pub pricing: Pricing,
     #[serde(default)]
     pub products: Vec<Product>,
-    /// RevenueCat 用（Rust 版では使わない）
-    #[serde(default)]
-    pub revenuecat: Option<Ignored>,
     #[serde(default)]
     pub appstore: AppStore,
 }
-
-/// 中身を見ずに読み飛ばす値。
-#[derive(Debug, Clone, Deserialize)]
-pub struct Ignored(#[allow(dead_code)] serde_yaml_ng::Value);
 
 /// 1 つのテリトリ / リージョン / 通貨（多地域は対象外）。
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -97,9 +84,6 @@ pub struct Product {
     /// 通貨の主単位。小数可（4.99 = $4.99、600 = ¥600）
     #[serde(default)]
     pub price: f64,
-    /// RevenueCat 用（Rust 版では使わない）
-    #[serde(default)]
-    pub rc_package: String,
     #[serde(default)]
     pub localizations: Vec<Localization>,
 }
@@ -269,7 +253,6 @@ mod tests {
 appName: Demo
 bundleId: com.example.demo
 packageName: com.example.demo
-entitlement: { key: pro, displayName: Pro }
 pricing: { territory: USA, region: US, currency: USD }
 products:
   - key: monthly
@@ -278,12 +261,10 @@ products:
     playBasePlanId: monthly
     period: P1M
     price: 4.99
-    rcPackage: $rc_monthly
   - key: lifetime
     type: nonConsumable
     playProductId: demo_lifetime
     price: 600
-revenuecat: { project: Demo, offering: default }
 "#;
 
     fn product(price: f64) -> Product {
@@ -294,7 +275,19 @@ revenuecat: { project: Demo, offering: default }
     }
 
     #[test]
-    fn parses_go_era_file_with_revenuecat_keys() {
+    fn unknown_keys_are_errors() {
+        // 以前は読み飛ばしていた RevenueCat 用のキーも、今は知らないキー。
+        for extra in [
+            "entitlement: { key: pro }\n",
+            "revenuecat: { project: Demo }\n",
+        ] {
+            let err = Config::parse(&format!("{BASE}{extra}"), "t").unwrap_err();
+            assert!(matches!(err, ConfigError::Parse { .. }), "{err}");
+        }
+    }
+
+    #[test]
+    fn parses_subscriptions_and_one_time_products() {
         let c = Config::parse(BASE, "t").unwrap();
         assert_eq!(c.products.len(), 2);
         assert!(c.products[1].is_one_time());
