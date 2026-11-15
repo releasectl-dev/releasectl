@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt parity e2e-plan e2e-apply e2e-aab
+.PHONY: build test lint fmt e2e-plan e2e-apply e2e-aab
 
 build: ## target/release/releasectl
 	cargo build --release
@@ -12,11 +12,6 @@ lint: ## fmt の差分なし + clippy -D warnings
 
 fmt:
 	cargo fmt
-
-## Go 版 iapctl との plan 出力の一致テスト（v0.1.0 のときだけ意味がある。読み取り専用）。
-## GO_SRC / IAP_YAML / ENV_FILE を渡す。ワークスペースの `make parity` が sonir の値で呼ぶ。
-parity:
-	./parity/run.sh
 
 ## --- E2E（テストアプリ dev.releasectl.e2e。apply を流してよい唯一の対象）---
 ## ENV_FILE で鍵の env を渡す（例: ENV_FILE=~/sonir/sonir-workspace/releasectl/.env）
