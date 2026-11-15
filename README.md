@@ -32,7 +32,7 @@ target/release/releasectl iap plan --config iap.yaml -o markdown                
 ## GitHub Actions
 
 ```yaml
-- uses: releasectl-dev/releasectl@v0.7.0
+- uses: releasectl-dev/releasectl@v0.8.0
   with:
     command: ${{ github.event_name == 'pull_request' && 'iap-plan' || 'iap-apply' }}
     config: iap.yaml
