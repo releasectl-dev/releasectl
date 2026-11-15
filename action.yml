@@ -1,48 +1,48 @@
 name: releasectl
-description: App Store Connect / Google Play の課金カタログを iap.yaml から plan / apply する（鍵は Secrets から env で渡す）
+description: Plan and apply your App Store Connect and Google Play catalog and listing from YAML. Store keys are passed as env from your secrets and go only to the stores.
 author: releasectl-dev
 
 inputs:
   command:
-    description: iap-plan / iap-apply / iap-retire-plan / iap-retire（課金カタログ）、meta-plan / meta-apply / meta-export（掲載情報。export はストアの今の値を JSON に出すだけ）
+    description: iap-plan / iap-apply / iap-retire-plan / iap-retire (purchase catalog), meta-plan / meta-apply / meta-export (store listing; export only prints what the stores have now as JSON)
     default: iap-plan
   config:
-    description: desired-state の YAML（課金カタログは iap.yaml、掲載情報は metadata.yaml など）
+    description: Path to the desired-state YAML (iap.yaml for the purchase catalog, metadata.yaml for the store listing)
     default: iap.yaml
   only:
-    description: provider を絞る（appstore,googleplay）。空なら全部
+    description: Providers to run, comma-separated (appstore,googleplay). Empty runs all
     default: ""
   app-store-version:
-    description: meta-plan / meta-apply で編集する App Store の版（"1.4.0"）。metadata.yaml の appStoreVersion より優先する。空なら YAML のまま。meta-export では出す版（"live" か番号）
+    description: For meta-plan / meta-apply, the App Store version to edit ("1.4.0"); overrides appStoreVersion in metadata.yaml. For meta-export, the version to export ("live" or a version string)
     default: ""
   create-app-store-version:
-    description: meta-plan / meta-apply で、その版が無ければ作る（plan は作る予定を表示するだけ）。app-store-version か appStoreVersion が要る
+    description: For meta-plan / meta-apply, create that App Store version if it does not exist (plan only shows it). Needs app-store-version or appStoreVersion
     default: "false"
   comment:
-    description: PR にコメントする（push のときは、その commit の PR に結果を付ける）
+    description: Comment the result on the pull request (on push, on the pull request the commit came from)
     default: "true"
   github-token:
-    description: コメント・Issue に使うトークン
+    description: Token used for comments and Issues
     default: ${{ github.token }}
   drift-issue:
-    description: plan の差分を Issue で知らせる（定期実行用。差分があれば開いて内容が変わったときだけ更新、消えたら閉じる）
+    description: Report plan changes as an Issue (for scheduled runs). Opens one when the store drifts, updates it only when the changes differ, and closes it when the store is back in sync
     default: "false"
 
 outputs:
   exitcode:
-    description: 0 差分なし / 2 差分あり / 1 エラー
+    description: 0 no changes / 2 changes pending / 1 errors
     value: ${{ steps.run.outputs.exitcode }}
   has-changes:
     description: true / false
     value: ${{ steps.run.outputs.has-changes }}
   json:
-    description: -o json の結果のファイルのパス
+    description: Path to the JSON report file
     value: ${{ steps.run.outputs.json }}
 
 runs:
   using: composite
   steps:
-    # Phase 3（署名バイナリの配布）までは、uses: に書いたタグのソースからビルドする。
+    # Builds the CLI from the source at the ref given in `uses:`.
     - name: Cache releasectl build
       uses: actions/cache@v6
       with:
@@ -78,13 +78,13 @@ runs:
           iap-plan|iap-apply|iap-retire-plan|iap-retire) sub=(iap "${RC_COMMAND#iap-}") ;;
           meta-plan|meta-apply|meta-export) sub=(meta "${RC_COMMAND#meta-}") ;;
           plan|apply|retire-plan|retire)
-            echo "::error::command: $RC_COMMAND は v0.6.0 から iap-$RC_COMMAND になりました（meta-plan と同じ書き方）"; exit 1 ;;
+            echo "::error::command: $RC_COMMAND was renamed to iap-$RC_COMMAND in v0.6.0"; exit 1 ;;
           *) echo "::error::unknown command: $RC_COMMAND"; exit 1 ;;
         esac
         json="$RUNNER_TEMP/releasectl.json"; md="$RUNNER_TEMP/releasectl.md"
         if [ "$RC_COMMAND" = meta-export ]; then
-          # ストアの今の値を JSON に出すだけ（差分も Markdown も無い。Cloud に送る用）
-          [ "$RC_ASC_CREATE" = true ] && { echo "::error::create-app-store-version は meta-export では使えません"; exit 1; }
+          # Only prints what the stores have now as JSON: no diff and no Markdown.
+          [ "$RC_ASC_CREATE" = true ] && { echo "::error::create-app-store-version cannot be used with meta-export"; exit 1; }
           args=("${sub[@]}" --config "$RC_CONFIG" --json-out "$json")
         else
           args=("${sub[@]}" --config "$RC_CONFIG" --detailed-exitcode --json-out "$json" --markdown-out "$md")
@@ -96,10 +96,10 @@ runs:
           [ -n "$RC_ASC_VERSION" ] && args+=(--app-store-version "$RC_ASC_VERSION")
           [ "$RC_ASC_CREATE" = true ] && args+=(--create-app-store-version)
         elif [ -n "$RC_ASC_VERSION" ] || [ "$RC_ASC_CREATE" = true ]; then
-          echo "::error::app-store-version / create-app-store-version は meta-plan / meta-apply でだけ使えます"; exit 1
+          echo "::error::app-store-version / create-app-store-version can only be used with meta-* commands"; exit 1
         fi
-        # 鍵は env のまま CLI に渡す。ここでは触らない・ログに出さない。
-        # Actions の bash は -e 付きで起動する。差分あり（2）で止まらないよう終了コードを受け取る。
+        # The keys stay in the environment for the CLI. This script never reads or logs them.
+        # Actions starts bash with -e, so capture the exit code: 2 (changes pending) must not stop the step.
         code=0
         if [ "$RC_COMMAND" = meta-export ]; then
           releasectl "${args[@]}" > /dev/null || code=$?
@@ -111,11 +111,11 @@ runs:
         echo "has-changes=$([ "$code" = 2 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
         echo "json=$json" >> "$GITHUB_OUTPUT"
         [ -f "$md" ] && echo "markdown=$md" >> "$GITHUB_OUTPUT"
-        # 差分あり（2）は成功。エラー（1）だけ失敗にする。コメントは失敗しても付けたいので後で落とす。
+        # 2 (changes pending) is a success; only 1 (errors) fails. Fail later, so the comment is still posted.
         exit 0
 
     - name: Comment on the pull request
-      # PR と push のときだけ（定期実行で main の最新 commit の PR にコメントしないように）
+      # Only on pull_request and push, so a scheduled run does not comment on the pull request of the latest commit.
       if: inputs.comment == 'true' && steps.run.outputs.markdown != '' && (github.event_name == 'pull_request' || github.event_name == 'push')
       shell: bash
       env:
@@ -129,7 +129,7 @@ runs:
         repo="$GITHUB_REPOSITORY"
         marker="<!-- releasectl:$RC_COMMAND -->"
         if [ -n "${PR_NUMBER:-}" ]; then
-          # PR: 印の付いたコメントを 1 つだけ持ち、書き換える（sticky）
+          # Pull request: keep one comment with the marker and rewrite it (sticky).
           id=$(gh api "repos/$repo/issues/$PR_NUMBER/comments" --paginate \
                  --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
           if [ -n "$id" ]; then
@@ -138,7 +138,7 @@ runs:
             gh api -X POST "repos/$repo/issues/$PR_NUMBER/comments" -F body=@"$RC_MD" >/dev/null
           fi
         else
-          # push: その commit を含む PR に結果を付ける（無ければ job summary だけ）
+          # Push: add the result to the pull request that contains the commit (job summary only when there is none).
           pr=$(gh api "repos/$repo/commits/$GITHUB_SHA/pulls" --jq '.[0].number // empty' 2>/dev/null || true)
           if [ -n "$pr" ]; then
             gh api -X POST "repos/$repo/issues/$pr/comments" -F body=@"$RC_MD" >/dev/null
@@ -164,33 +164,33 @@ runs:
 
         if [ "$RC_CODE" = 0 ]; then
           if [ -n "$issue" ]; then
-            gh issue comment "$issue" -R "$repo" --body "✅ 解消しました（plan が差分なし）: $RUN_URL" >/dev/null
+            gh issue comment "$issue" -R "$repo" --body "✅ Resolved: the plan shows no changes. $RUN_URL" >/dev/null
             gh issue close "$issue" -R "$repo" >/dev/null
-            echo "drift issue #$issue を閉じた"
+            echo "closed drift issue #$issue"
           fi
           exit 0
         fi
 
-        # 本文 = 印 + plan の Markdown（先頭の plan の印は除く）。末尾の「検出:」は比較から外す。
+        # Body = marker + the plan's Markdown (without the plan's own marker line). The trailing "Detected:" part is not compared.
         content="$RUNNER_TEMP/drift-content.md"; body="$RUNNER_TEMP/drift-body.md"
         { echo "$marker"; tail -n +2 "$RC_MD"; } > "$content"
-        { cat "$content"; echo; echo "---"; echo "検出: $RUN_URL（$(date -u +%Y-%m-%dT%H:%MZ)）"; } > "$body"
+        { cat "$content"; echo; echo "---"; echo "Detected: $RUN_URL ($(date -u +%Y-%m-%dT%H:%MZ))"; } > "$body"
 
         if [ -z "$issue" ]; then
-          gh label create "$label" -R "$repo" --color D93F0B --description "releasectl: ストアのカタログが desired-state とずれている" --force >/dev/null
-          url=$(gh issue create -R "$repo" --title "releasectl: ストアのカタログが $RC_CONFIG とずれています" --label "$label" --body-file "$body")
-          echo "drift issue を開いた: $url"
+          gh label create "$label" -R "$repo" --color D93F0B --description "releasectl: the store differs from the desired state" --force >/dev/null
+          url=$(gh issue create -R "$repo" --title "releasectl: the store has drifted from $RC_CONFIG" --label "$label" --body-file "$body")
+          echo "opened drift issue: $url"
           exit 0
         fi
         old="$RUNNER_TEMP/drift-old.md"
         gh issue view "$issue" -R "$repo" --json body --jq .body | sed '/^---$/,$d' > "$old"
-        # 末尾の空行の違いは無視して比べる
+        # Ignore differences in trailing blank lines.
         if diff -q <(sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$old") <(sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$content") >/dev/null; then
-          echo "drift issue #$issue: 内容は前回と同じ（何もしない）"
+          echo "drift issue #$issue: unchanged since the last run"
         else
           gh issue edit "$issue" -R "$repo" --body-file "$body" >/dev/null
-          gh issue comment "$issue" -R "$repo" --body "🔄 ドリフトの内容が変わりました: $RUN_URL" >/dev/null
-          echo "drift issue #$issue を更新した"
+          gh issue comment "$issue" -R "$repo" --body "🔄 The drift has changed. $RUN_URL" >/dev/null
+          echo "updated drift issue #$issue"
         fi
 
     - name: Fail on error

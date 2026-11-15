@@ -185,3 +185,7 @@ make lint     # cargo fmt --check + clippy -D warnings
 ```
 
 Changes to how releasectl reads or writes a store are checked against a test app (`e2e/`), the only app `apply` is ever run against in this repository. See `e2e/README.md`.
+
+## License
+
+[Apache-2.0](LICENSE)

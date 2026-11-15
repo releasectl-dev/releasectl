@@ -383,14 +383,14 @@ mod tests {
             "USD 4.99",
             "USD 5.99",
         );
-        r.add("subscription", "sonir_pro_monthly", Status::Exists, "");
+        r.add("subscription", "pro_monthly", Status::Exists, "");
         assert_eq!(
             r.actions[0].render(),
             "  ~ basePlan.price       monthly  — USD 4.99→USD 5.99"
         );
         assert_eq!(
             r.actions[1].render(),
-            "  = subscription         sonir_pro_monthly"
+            "  = subscription         pro_monthly"
         );
     }
 

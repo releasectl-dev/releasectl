@@ -6,23 +6,23 @@ build: ## target/release/releasectl
 test: ## cargo test
 	cargo test
 
-lint: ## fmt の差分なし + clippy -D warnings
+lint: ## cargo fmt --check + clippy -D warnings
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 
 fmt:
 	cargo fmt
 
-## --- E2E（テストアプリ dev.releasectl.e2e。apply を流してよい唯一の対象）---
-## ENV_FILE で鍵の env を渡す（例: ENV_FILE=~/sonir/sonir-workspace/releasectl/.env）
+## --- E2E (the test app dev.releasectl.e2e, the only app apply is ever run against) ---
+## Pass the store keys with ENV_FILE, a file of KEY=value lines (e.g. ENV_FILE=~/secrets/releasectl.env).
 ENV_PATH = $(patsubst ~/%,$(HOME)/%,$(ENV_FILE))
 E2E_RUN = set -a; [ -n "$(ENV_PATH)" ] && . "$(ENV_PATH)"; set +a;
 
-e2e-plan: build ## テストアプリに plan（差分なしで exit 0、差分ありで 2）
+e2e-plan: build ## plan against the test app (exit 0 when in sync, 2 when there are changes)
 	@$(E2E_RUN) cd $(dir $(ENV_PATH)). && $(CURDIR)/target/release/releasectl iap plan --config $(CURDIR)/e2e/catalog.yaml --detailed-exitcode
 
-e2e-apply: build ## テストアプリに apply（作った商品は消せない）
+e2e-apply: build ## apply to the test app (products it creates can never be deleted)
 	@$(E2E_RUN) cd $(dir $(ENV_PATH)). && $(CURDIR)/target/release/releasectl iap apply --config $(CURDIR)/e2e/catalog.yaml
 
-e2e-aab: ## Play に上げる空の AAB（BILLING 権限入り）。鍵は ~/.releasectl-secrets/e2e-upload.properties
+e2e-aab: ## build the empty AAB for Google Play (with the BILLING permission). Upload key: ~/.releasectl-secrets/e2e-upload.properties
 	cd e2e/app && flutter build appbundle --release

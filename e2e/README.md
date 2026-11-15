@@ -1,20 +1,22 @@
-# E2E（テストアプリ）
+# E2E test app
 
-releasectl の apply を実ストアで検証するための、審査に出さないテストアプリ。
-**apply を流してよいのはこのアプリだけ**（sonir などの本物のアプリには plan しか流さない）。
+A test app that is never submitted for review, used to check releasectl's writes against the real stores.
+**This is the only app `apply` is run against.** Real apps only ever get `plan`.
 
-| ストア | 識別子 | 状態 |
-|---|---|---|
-| App Store Connect | bundle id `dev.releasectl.e2e`、アプリ名 `releasectl-e2e`、SKU `releasectl-e2e` | 作成済み（2026-11-09）。グループ `E2E Pro`、サブスク 3 件・買い切り 1 件を作成済み |
-| Google Play | package `dev.releasectl.e2e`、アプリ名 `releasectl-e2e`（無料） | 作成済み（2026-11-09）。内部テストに AAB（versionCode 1）を下書きで登録済み。サブスク 3 件・買い切り 1 件を作成済み |
+| Store | Identifiers |
+|---|---|
+| App Store Connect | bundle ID `dev.releasectl.e2e`, app name `releasectl-e2e`. Subscription group `E2E Pro`, three subscriptions and one non-consumable |
+| Google Play | package `dev.releasectl.e2e`, app name `releasectl-e2e` (free). An AAB is registered on the internal track as a draft. Three subscriptions and one one-time product |
 
-- `metadata.yaml` — テストアプリの掲載情報。画像は `python3 make_shots.py [VARIANT]` で `shots/` に作る（リポジトリには入れない）。
-  年齢区分は Console で質問票に答えるまで `~ ageRating` が出続ける。
-- `catalog.yaml` — テストアプリのカタログ。**App Store の productId は一度作ると消せず再利用もできない**ので、商品を足すときは新しい id にする。
-- `app/` — Play に上げる空の Flutter アプリ（BILLING 権限だけ入れてある）。`make e2e-aab` でビルドする。
-  アップロード鍵は `~/.releasectl-secrets/e2e-upload.{jks,properties}`（リポジトリの外。無くすと Play のアップロード鍵のリセットが要る）。
+- `catalog.yaml` — the test app's purchase catalog. **App Store product IDs can never be deleted or reused**, so use a new ID when you add a product.
+- `metadata.yaml` — the test app's store listing. Generate the images into `shots/` with `python3 make_shots.py [VARIANT]` (they are not committed).
+  `~ ageRating` keeps showing until the age rating questionnaire is answered once in App Store Connect.
+- `app/` — an empty Flutter app for Google Play, with only the BILLING permission. Build it with `make e2e-aab`.
+  The upload key lives outside the repository in `~/.releasectl-secrets/e2e-upload.{jks,properties}`. Losing it means resetting the upload key in Play Console.
 
 ```bash
-make e2e-plan  ENV_FILE=~/sonir/sonir-workspace/releasectl/.env
-make e2e-apply ENV_FILE=~/sonir/sonir-workspace/releasectl/.env
+make e2e-plan  ENV_FILE=~/secrets/releasectl.env    # a file of KEY=value lines with the store keys
+make e2e-apply ENV_FILE=~/secrets/releasectl.env
 ```
+
+The workflows in `.github/workflows/` run the same checks: a plan on pull requests that touch these files, an apply on merge, and a drift check every day.
