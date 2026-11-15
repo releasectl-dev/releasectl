@@ -24,9 +24,23 @@ pub trait Reconciler {
     }
     /// ストアの今の値を JSON で返す（読むだけ。`releasectl meta export`）。項目ごとの読み取りの失敗は
     /// `Status::Error` として report に積み、その値は出さない（「無い」とはみなさない）。
-    fn export(&self, _report: &mut Report) -> Result<serde_json::Value, String> {
+    fn export(
+        &self,
+        _opts: &ExportOpts,
+        _report: &mut Report,
+    ) -> Result<serde_json::Value, String> {
         Err(format!("{}: export is not supported here", self.name()))
     }
+}
+
+/// `export` に足すもの。既定（`meta export`）は何も足さない。`meta init` が両方を使う。
+#[derive(Debug, Clone, Default)]
+pub struct ExportOpts {
+    /// 画像をこのディレクトリにダウンロードし、置いたファイルを `screenshotFiles` / `imageFiles` に出す
+    pub images: Option<std::path::PathBuf>,
+    /// App Store の審査情報（連絡先・デモアカウント）を `review` に出す。公開されていない情報なので
+    /// `meta export`（Cloud に送る）では出さない。パスワードはどちらでも出さない
+    pub review: bool,
 }
 
 /// 鍵が無いときは `Err(理由)` を返し、呼び出し側はその provider を飛ばす。

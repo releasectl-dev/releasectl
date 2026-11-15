@@ -92,7 +92,7 @@ pub(crate) fn md5_hex(data: &[u8]) -> String {
     hex::encode(Md5::digest(data))
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(data))
 }
@@ -130,6 +130,41 @@ pub(crate) fn list_shots(dir: &Path) -> Result<Vec<ShotFile>, String> {
             })
         })
         .collect()
+}
+
+/// set の言語のディレクトリ。ロケールそのままの名前（en-GB）があればそれ、無ければ地域を落とした名前（en）。
+pub(crate) fn shots_dir(
+    shots: &releasectl_core::meta::Screenshots,
+    set: &releasectl_core::meta::ScreenshotSet,
+    locale: &str,
+) -> std::path::PathBuf {
+    let full = shots.full_locale_dir(set, locale);
+    if full.is_dir() {
+        full
+    } else {
+        shots.locale_dir(set, locale)
+    }
+}
+
+/// 中身から決める拡張子（png / jpg）。どちらでもなければ None。
+pub(crate) fn image_ext(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if data.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else {
+        None
+    }
+}
+
+/// `meta init` の画像 1 枚を `dir/NN.<ext>` に書く（NN は 1 始まりの並び順）。書いたファイル名を返す。
+pub(crate) fn write_shot(dir: &Path, index: usize, data: &[u8]) -> Result<String, String> {
+    let ext = image_ext(data).ok_or("downloaded file is not a png / jpg")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let name = format!("{:02}.{ext}", index + 1);
+    let path = dir.join(&name);
+    std::fs::write(&path, data).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(name)
 }
 
 pub(crate) fn content_type_for(name: &str) -> &'static str {
@@ -205,5 +240,8 @@ mod tests {
         assert_eq!(content_type_for("x.JPG"), "image/jpeg");
         assert_eq!(content_type_for("x.png"), "image/png");
         assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(image_ext(b"\x89PNG\r\n\x1a\n...."), Some("png"));
+        assert_eq!(image_ext(&[0xff, 0xd8, 0xff, 0xe0]), Some("jpg"));
+        assert_eq!(image_ext(b"<html>"), None);
     }
 }

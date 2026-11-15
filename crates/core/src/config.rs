@@ -23,7 +23,7 @@ pub enum ConfigError {
 }
 
 /// パース済みの iap.yaml。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Config {
     #[serde(default)]
@@ -247,9 +247,23 @@ pub fn asc_period(iso: &str) -> Result<&'static str, String> {
     })
 }
 
+/// `asc_period` の逆（`iap init` 用）。知らない期間は None。
+pub fn iso_period(asc: &str) -> Option<&'static str> {
+    ["P1W", "P1M", "P2M", "P3M", "P6M", "P1Y"]
+        .into_iter()
+        .find(|iso| asc_period(iso) == Ok(asc))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn period_round_trip() {
+        assert_eq!(iso_period("ONE_YEAR"), Some("P1Y"));
+        assert_eq!(iso_period("TWO_MONTHS"), Some("P2M"));
+        assert_eq!(iso_period("THREE_YEARS"), None);
+    }
 
     const BASE: &str = r#"
 appName: Demo

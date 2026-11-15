@@ -28,8 +28,8 @@ impl Reconciler for MetaPlay {
         "googleplay"
     }
 
-    fn export(&self, r: &mut Report) -> Result<Value, String> {
-        self.export_store(r)
+    fn export(&self, opts: &crate::ExportOpts, r: &mut Report) -> Result<Value, String> {
+        self.export_store(opts, r)
     }
 
     fn reconcile(&self, apply: bool, r: &mut Report) -> Result<(), String> {
@@ -69,9 +69,9 @@ impl MetaPlay {
         let mut changed = false;
         for loc in &self.cfg.locales {
             let mut desired = Map::new();
-            put_if(&mut desired, "title", &loc.name);
+            put_if(&mut desired, "title", loc.play_name());
             put_if(&mut desired, "shortDescription", &loc.short_description);
-            put_if(&mut desired, "fullDescription", &loc.description);
+            put_if(&mut desired, "fullDescription", loc.play_description());
             if desired.is_empty() {
                 continue;
             }

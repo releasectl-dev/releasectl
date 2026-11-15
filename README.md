@@ -12,6 +12,8 @@ target/release/releasectl iap plan  --config iap.yaml --only googleplay
 target/release/releasectl iap retire-plan --config iap.yaml             # 販売停止の差分（書き込みなし）
 target/release/releasectl meta plan --config metadata.yaml              # 掲載情報（テキスト・審査情報・画像）の差分
 target/release/releasectl play upload-plan --package <id> --aab app.aab   # .aab を上げて検証し、捨てる
+target/release/releasectl iap init  --bundle-id <id> --package-name <id>   # 既にあるアプリから iap.yaml を書き出す（読むだけ）
+target/release/releasectl meta init --bundle-id <id> --package-name <id>   # 同じく metadata.yaml と画像
 target/release/releasectl iap plan --config iap.yaml -o json --detailed-exitcode   # CI 向け（差分ありで exit 2）
 target/release/releasectl iap plan --config iap.yaml -o markdown                    # PR コメント用
 ```

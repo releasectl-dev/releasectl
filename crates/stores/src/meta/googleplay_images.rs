@@ -22,7 +22,7 @@ impl MetaPlay {
             for loc in &self.cfg.locales {
                 let lang = play_lang(&loc.locale);
                 let target = format!("{}/{lang}", set.image_type);
-                let dir = shots.locale_dir(set, &loc.locale);
+                let dir = super::shots_dir(shots, set, &loc.locale);
                 let files = match list_shots(&dir) {
                     Ok(f) => f,
                     Err(e) => {
@@ -134,6 +134,15 @@ impl MetaPlay {
 
     /// listing の画像タイプの今の画像の SHA-256。404（listing も画像もまだ無い）は空。
     pub(super) fn list_image_shas(&self, base: &str) -> Result<Vec<String>, String> {
+        Ok(self
+            .list_images(base)?
+            .into_iter()
+            .map(|(sha, _)| sha)
+            .collect())
+    }
+
+    /// listing の画像タイプの今の画像の（SHA-256, URL）。404（listing も画像もまだ無い）は空。
+    pub(super) fn list_images(&self, base: &str) -> Result<Vec<(String, String)>, String> {
         let resp = self.cli.r#do("GET", base, None)?;
         if resp.status == 404 {
             return Ok(Vec::new());
@@ -146,7 +155,10 @@ impl MetaPlay {
             .and_then(Value::as_array)
             .map(|a| {
                 a.iter()
-                    .filter_map(|im| im.get("sha256").and_then(Value::as_str).map(str::to_string))
+                    .filter_map(|im| {
+                        let url = im.get("url").and_then(Value::as_str).unwrap_or("");
+                        Some((im.get("sha256")?.as_str()?.to_string(), url.to_string()))
+                    })
                     .collect()
             })
             .unwrap_or_default())

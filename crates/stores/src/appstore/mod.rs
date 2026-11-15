@@ -9,6 +9,7 @@
 //! 突合する（productId / referenceName は一意で、重複は 409）。
 
 mod auth;
+mod export;
 
 use crate::http::{self, Client, Response};
 use crate::{Reconciler, env, go_path_err};
@@ -138,6 +139,10 @@ fn display_name(p: &Product) -> &str {
 impl Reconciler for AppStore {
     fn name(&self) -> &'static str {
         "appstore"
+    }
+
+    fn export(&self, _opts: &crate::ExportOpts, r: &mut Report) -> Result<Value, String> {
+        self.export_catalog(r)
     }
 
     /// App Store には可逆な「販売停止」の書き込みが無いので、手作業を案内するだけ（書き込みなし）。

@@ -87,8 +87,8 @@ impl Reconciler for MetaAppStore {
         "appstore"
     }
 
-    fn export(&self, r: &mut Report) -> Result<Value, String> {
-        self.export_store(r)
+    fn export(&self, opts: &crate::ExportOpts, r: &mut Report) -> Result<Value, String> {
+        self.export_store(opts, r)
     }
 
     fn reconcile(&self, apply: bool, r: &mut Report) -> Result<(), String> {
@@ -488,10 +488,14 @@ impl MetaAppStore {
             ("contactPhone", &rv.contact_phone),
             ("contactEmail", &rv.contact_email),
             ("demoAccountName", &rv.demo_account_name),
-            ("demoAccountPassword", &rv.demo_account_password),
             ("notes", &rv.notes),
         ] {
             desired.insert(k.into(), json!(v.trim_end()));
+        }
+        // 空のパスワードは「管理しない」（YAML に書かずに済むように。ストアの値を消さない）
+        let password = rv.demo_account_password.trim_end();
+        if !password.is_empty() {
+            desired.insert("demoAccountPassword".into(), json!(password));
         }
         desired.insert(
             "demoAccountRequired".into(),

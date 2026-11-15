@@ -2,6 +2,8 @@
 //! キーの名前は metadata.yaml の項目名にそろえる（Cloud が YAML と比べ、取り込みで YAML に戻せるように）。
 
 use super::appstore::{MetaAppStore, is_editable, state_of};
+use super::{md5_hex, write_shot};
+use crate::ExportOpts;
 use crate::appstore::{Resource, attr, get_all, parse_list};
 use releasectl_core::{AppStoreVersion, Report, Status};
 use serde_json::{Map, Value, json};
@@ -42,7 +44,17 @@ fn pick_attrs(attrs: &Value, names: &[&str]) -> Map<String, Value> {
         .collect()
 }
 
+type JsonMap = Map<String, Value>;
+
 const APP_INFO_FIELDS: [&str; 3] = ["name", "subtitle", "privacyPolicyUrl"];
+const REVIEW_FIELDS: [&str; 6] = [
+    "contactFirstName",
+    "contactLastName",
+    "contactPhone",
+    "contactEmail",
+    "demoAccountName",
+    "notes",
+];
 const VERSION_FIELDS: [&str; 6] = [
     "description",
     "keywords",
@@ -53,7 +65,7 @@ const VERSION_FIELDS: [&str; 6] = [
 ];
 
 impl MetaAppStore {
-    pub(super) fn export_store(&self, r: &mut Report) -> Result<Value, String> {
+    pub(super) fn export_store(&self, opts: &ExportOpts, r: &mut Report) -> Result<Value, String> {
         r.set_key_singleton(&["app", "appInfo", "contentRights", "version"]);
         let bundle = self.cfg.bundle_id.as_str();
         if bundle.is_empty() {
@@ -110,7 +122,10 @@ impl MetaAppStore {
                 if let Some(c) = v.attributes.get("copyright").and_then(Value::as_str) {
                     settings.insert("copyright".into(), json!(c));
                 }
-                self.export_version(&v.id, &mut out, r);
+                self.export_version(&v.id, opts, &mut out, r);
+                if opts.review {
+                    self.export_review(&v.id, &mut out, r);
+                }
             }
         }
 
@@ -154,7 +169,54 @@ impl MetaAppStore {
         Ok(Value::Object(out))
     }
 
-    fn export_version(&self, version_id: &str, out: &mut Map<String, Value>, r: &mut Report) {
+    /// 審査情報を metadata.yaml の `review` の名前で出す（`meta init` 用）。パスワードは出さない。
+    fn export_review(&self, version_id: &str, out: &mut Map<String, Value>, r: &mut Report) {
+        let resp = match self.cli.r#do(
+            "GET",
+            &format!("/v1/appStoreVersions/{version_id}/appStoreReviewDetail"),
+            None,
+        ) {
+            Ok(resp) => resp,
+            Err(e) => return r.add("reviewDetail", version_id, Status::Error, e),
+        };
+        if resp.status == 404 {
+            return;
+        }
+        if !resp.ok() {
+            return r.add("reviewDetail", version_id, Status::Error, resp.error());
+        }
+        let v: Value = resp.json().unwrap_or(Value::Null);
+        let Some(attrs) = v.pointer("/data/attributes") else {
+            return;
+        };
+        let mut m = pick_attrs(attrs, &REVIEW_FIELDS);
+        m.retain(|_, v| v.as_str().is_some_and(|s| !s.trim().is_empty()));
+        let required = attrs.get("demoAccountRequired").and_then(Value::as_bool);
+        if m.is_empty() && required != Some(true) {
+            return;
+        }
+        m.insert(
+            "demoAccountRequired".into(),
+            json!(required.unwrap_or(false)),
+        );
+        // ストアにパスワードがあることだけ伝える（init が「手で入れる」と案内する）
+        if attrs
+            .get("demoAccountPassword")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        {
+            m.insert("hasDemoAccountPassword".into(), json!(true));
+        }
+        out.insert("review".into(), Value::Object(m));
+    }
+
+    fn export_version(
+        &self,
+        version_id: &str,
+        opts: &ExportOpts,
+        out: &mut Map<String, Value>,
+        r: &mut Report,
+    ) {
         let locs = match self.version_localizations(version_id) {
             Ok(l) => l,
             Err(e) => {
@@ -164,6 +226,7 @@ impl MetaAppStore {
         };
         let mut texts = Map::new();
         let mut shots = Map::new();
+        let mut files = Map::new();
         let mut locales: Vec<&String> = locs.keys().collect();
         locales.sort();
         for locale in locales {
@@ -172,37 +235,76 @@ impl MetaAppStore {
                 locale.clone(),
                 Value::Object(pick_attrs(attrs, &VERSION_FIELDS)),
             );
-            match self.export_screenshots(loc_id) {
-                Ok(m) if !m.is_empty() => {
-                    shots.insert(locale.clone(), Value::Object(m));
+            match self.export_screenshots(loc_id, locale, opts, r) {
+                Ok((m, f)) => {
+                    if !m.is_empty() {
+                        shots.insert(locale.clone(), Value::Object(m));
+                    }
+                    if !f.is_empty() {
+                        files.insert(locale.clone(), Value::Object(f));
+                    }
                 }
-                Ok(_) => {}
                 Err(e) => r.add("screenshot", locale, Status::Error, e),
             }
         }
         out.insert("versionLocalizations".into(), Value::Object(texts));
         out.insert("screenshots".into(), Value::Object(shots));
+        if opts.images.is_some() {
+            out.insert("screenshotFiles".into(), Value::Object(files));
+        }
     }
 
     /// 表示タイプ → スクリーンショットの MD5（並び順）。処理中で MD5 がまだ無いものは空文字。
-    fn export_screenshots(&self, loc_id: &str) -> Result<Map<String, Value>, String> {
+    /// `opts.images` があれば `<images>/appstore/<表示タイプ>/<ロケール>/NN.png` にダウンロードし、2 つ目に
+    /// 表示タイプ → `{dir, files, sameAsStore}` を返す（sameAsStore: 置いたファイルの MD5 がストアの値と同じか）。
+    fn export_screenshots(
+        &self,
+        loc_id: &str,
+        locale: &str,
+        opts: &ExportOpts,
+        r: &mut Report,
+    ) -> Result<(JsonMap, JsonMap), String> {
         let sets = get_all(
             &self.cli,
             &format!("/v1/appStoreVersionLocalizations/{loc_id}/appScreenshotSets?limit=50"),
             "list screenshot sets",
         )?;
         let mut m = Map::new();
+        let mut files = Map::new();
         for set in &sets {
-            let md5s: Vec<String> = self
-                .list_screenshots(&set.id)?
-                .into_iter()
-                .map(|s| s.checksum)
-                .collect();
-            if !md5s.is_empty() {
-                m.insert(attr(set, "screenshotDisplayType").to_string(), json!(md5s));
+            let display_type = attr(set, "screenshotDisplayType");
+            let list = self.list_screenshots(&set.id)?;
+            if list.is_empty() {
+                continue;
             }
+            if let Some(base) = &opts.images {
+                let rel = format!("appstore/{display_type}");
+                let dir = base.join(&rel).join(locale);
+                let mut names = Vec::new();
+                let mut same = true;
+                for (i, s) in list.iter().enumerate() {
+                    let target = format!("{display_type}/{locale}");
+                    if s.url.is_empty() {
+                        r.add("screenshot", &target, Status::Error, "no image url yet");
+                        continue;
+                    }
+                    match crate::http::download(&s.url).and_then(|d| {
+                        same &= md5_hex(&d).eq_ignore_ascii_case(&s.checksum);
+                        write_shot(&dir, i, &d)
+                    }) {
+                        Ok(name) => names.push(name),
+                        Err(e) => r.add("screenshot", &target, Status::Error, e),
+                    }
+                }
+                files.insert(
+                    display_type.to_string(),
+                    json!({"dir": rel, "files": names, "sameAsStore": same}),
+                );
+            }
+            let md5s: Vec<String> = list.into_iter().map(|s| s.checksum).collect();
+            m.insert(display_type.to_string(), json!(md5s));
         }
-        Ok(m)
+        Ok((m, files))
     }
 
     fn export_app_info(

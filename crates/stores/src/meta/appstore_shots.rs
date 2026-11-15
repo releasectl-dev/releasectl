@@ -66,6 +66,26 @@ pub(super) struct Shot {
     pub(super) checksum: String,
     /// assetDeliveryState.state（AWAITING_UPLOAD / UPLOAD_COMPLETE / COMPLETE / FAILED）
     state: String,
+    /// imageAsset の URL（templateUrl の {w}x{h}{c}.{f} を元の大きさ・png で埋めたもの）。処理中は空
+    pub(super) url: String,
+}
+
+/// imageAsset（templateUrl / width / height）→ 元の大きさの png の URL。
+fn asset_url(asset: Option<&Value>) -> String {
+    let Some(a) = asset else {
+        return String::new();
+    };
+    let (Some(t), Some(w), Some(h)) = (
+        a.get("templateUrl").and_then(Value::as_str),
+        a.get("width").and_then(Value::as_u64),
+        a.get("height").and_then(Value::as_u64),
+    ) else {
+        return String::new();
+    };
+    t.replace("{w}", &w.to_string())
+        .replace("{h}", &h.to_string())
+        .replace("{c}", "bb")
+        .replace("{f}", "png")
 }
 
 impl Shot {
@@ -107,7 +127,7 @@ impl MetaAppStore {
                     );
                     continue;
                 };
-                let dir = shots.locale_dir(set, &loc.locale);
+                let dir = super::shots_dir(shots, set, &loc.locale);
                 let files = match list_shots(&dir) {
                     Ok(f) => f,
                     Err(e) => {
@@ -262,6 +282,7 @@ impl MetaAppStore {
         )?
         .into_iter()
         .map(|s| Shot {
+            url: asset_url(s.attributes.get("imageAsset")),
             checksum: attr(&s, "sourceFileChecksum").to_string(),
             state: s
                 .attributes
@@ -404,11 +425,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn asset_url_fills_the_template() {
+        let a = json!({"templateUrl": "https://x/thumb/id/{w}x{h}{c}.{f}", "width": 1290, "height": 2796});
+        assert_eq!(asset_url(Some(&a)), "https://x/thumb/id/1290x2796bb.png");
+        // 処理中は imageAsset が無い
+        assert_eq!(asset_url(None), "");
+        assert_eq!(asset_url(Some(&json!({"templateUrl": "https://x"}))), "");
+    }
+
+    #[test]
     fn processing_shots_are_not_compared() {
         let shot = |checksum: &str, state: &str| Shot {
             id: "1".into(),
             checksum: checksum.into(),
             state: state.into(),
+            url: String::new(),
         };
         assert!(shot("", "UPLOAD_COMPLETE").processing());
         assert!(shot("", "AWAITING_UPLOAD").processing());

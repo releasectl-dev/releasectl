@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ConfigError;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct MetaConfig {
     #[serde(default)]
@@ -156,6 +156,37 @@ pub struct Locale {
     pub marketing_url: String,
     #[serde(default, rename = "privacyPolicyUrl")]
     pub privacy_policy_url: String,
+    /// Google Play だけ別の文面にするときの上書き（無ければ共通の name / description）
+    #[serde(default)]
+    pub play: Option<PlayOverride>,
+}
+
+/// Google Play の title / fullDescription を App Store と別にする（空の項目は共通の値を使う）。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlayOverride {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+impl Locale {
+    /// Google Play の title。
+    pub fn play_name(&self) -> &str {
+        match &self.play {
+            Some(p) if !p.name.trim_end().is_empty() => &p.name,
+            _ => &self.name,
+        }
+    }
+
+    /// Google Play の fullDescription。
+    pub fn play_description(&self) -> &str {
+        match &self.play {
+            Some(p) if !p.description.trim_end().is_empty() => &p.description,
+            _ => &self.description,
+        }
+    }
 }
 
 /// 掲載画像。画像は base_dir（設定ファイルからの相対）の下に置く。各セットは言語ごとの
@@ -222,10 +253,17 @@ pub fn ext_lower(name: &str) -> String {
 
 impl Screenshots {
     /// あるセットのあるロケールの画像のディレクトリ（葉は地域を落とした言語: en-US → en）。
+    /// 言語のディレクトリ（地域を落とした名前。ja / en …）。
     pub fn locale_dir(&self, set: &ScreenshotSet, locale: &str) -> PathBuf {
         Path::new(&self.base_dir)
             .join(&set.dir)
             .join(base_lang(locale))
+    }
+
+    /// ロケールそのままの名前のディレクトリ（en-GB / zh-Hant …）。あればこちらを先に使う
+    /// （en-US と en-GB のように、地域を落とすと同じ名前になる言語を分けるため）。
+    pub fn full_locale_dir(&self, set: &ScreenshotSet, locale: &str) -> PathBuf {
+        Path::new(&self.base_dir).join(&set.dir).join(locale)
     }
 }
 
@@ -234,19 +272,53 @@ pub fn base_lang(locale: &str) -> &str {
     locale.split('-').next().unwrap_or(locale)
 }
 
-/// App Store のロケール → Google Play の言語タグ（地域が要る）。
+/// App Store と Google Play でコードが違う言語（App Store, Google Play）。ここに無い言語は同じコード。
+const LOCALE_PAIRS: [(&str, &str); 20] = [
+    ("ar-SA", "ar"),
+    ("cs", "cs-CZ"),
+    ("da", "da-DK"),
+    ("el", "el-GR"),
+    ("es-MX", "es-419"),
+    ("fi", "fi-FI"),
+    ("he", "iw-IL"),
+    ("hi", "hi-IN"),
+    ("hu", "hu-HU"),
+    ("it", "it-IT"),
+    ("ja", "ja-JP"),
+    ("ko", "ko-KR"),
+    ("ms", "ms-MY"),
+    ("no", "no-NO"),
+    ("pl", "pl-PL"),
+    ("ru", "ru-RU"),
+    ("sv", "sv-SE"),
+    ("tr", "tr-TR"),
+    ("zh-Hans", "zh-CN"),
+    ("zh-Hant", "zh-TW"),
+];
+
+/// App Store のロケール → Google Play の言語タグ。
 pub fn play_lang(asc_locale: &str) -> String {
-    if asc_locale.contains('-') {
-        return asc_locale.to_string();
-    }
+    // 地域を省いた書き方（App Store のコードではないが、前から受け付けている）
     match asc_locale {
-        "ja" => "ja-JP",
-        "en" => "en-US",
-        "de" => "de-DE",
-        "fr" => "fr-FR",
-        other => other,
+        "en" => return "en-US".to_string(),
+        "de" => return "de-DE".to_string(),
+        "fr" => return "fr-FR".to_string(),
+        _ => {}
     }
-    .to_string()
+    LOCALE_PAIRS
+        .iter()
+        .find(|(a, _)| *a == asc_locale)
+        .map_or(asc_locale, |(_, p)| p)
+        .to_string()
+}
+
+/// Google Play の言語タグ → App Store のロケール（`play_lang` の逆。`meta init` が 2 つのストアの言語を 1 つにする）。
+pub fn asc_locale(play: &str) -> String {
+    LOCALE_PAIRS
+        .iter()
+        .find(|(_, p)| *p == play)
+        .map_or(play, |(a, _)| a)
+        .to_string()
 }
 
 impl MetaConfig {
@@ -299,6 +371,7 @@ impl MetaConfig {
                     l.locale
                 ));
             }
+            let play = l.play.clone().unwrap_or_default();
             for (field, value, max) in [
                 ("name", &l.name, 30),
                 ("subtitle", &l.subtitle, 30),
@@ -307,6 +380,8 @@ impl MetaConfig {
                 ("promotionalText", &l.promotional_text, 170),
                 ("description", &l.description, 4000),
                 ("whatsNew", &l.whats_new, 4000),
+                ("play.name", &play.name, 30),
+                ("play.description", &play.description, 4000),
             ] {
                 // 末尾の改行は送らないので数えない（YAML の | で付く分）
                 let n = value.trim_end().chars().count();
@@ -487,6 +562,25 @@ locales:
         assert_eq!(play_lang("ja"), "ja-JP");
         assert_eq!(play_lang("en-GB"), "en-GB");
         assert_eq!(play_lang("es"), "es");
+        assert_eq!(play_lang("de"), "de-DE");
+        assert_eq!(play_lang("zh-Hans"), "zh-CN");
+        assert_eq!(play_lang("pt-BR"), "pt-BR");
+        for (a, p) in LOCALE_PAIRS {
+            assert_eq!(asc_locale(&play_lang(a)), a);
+            assert_eq!(play_lang(&asc_locale(p)), p);
+        }
+        assert_eq!(asc_locale("de-DE"), "de-DE");
+        assert_eq!(asc_locale("en-US"), "en-US");
+        let l = Locale {
+            name: "A".into(),
+            description: "d".into(),
+            play: Some(PlayOverride {
+                name: "P".into(),
+                description: " \n".into(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!((l.play_name(), l.play_description()), ("P", "d"));
         assert_eq!(base_lang("en-US"), "en");
         assert_eq!(base_lang("ja"), "ja");
         let s = Screenshots {

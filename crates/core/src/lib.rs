@@ -3,8 +3,11 @@
 
 pub mod action;
 pub mod config;
+pub mod iap_init;
 pub mod markdown;
 pub mod meta;
+pub mod meta_init;
+pub mod yaml_out;
 
 pub use action::{
     Action, AppStoreVersion, JSON_VERSION, Money, Report, RunReport, Status, Summary, exit_code,

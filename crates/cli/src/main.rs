@@ -11,7 +11,7 @@ use releasectl_core::{
 };
 use releasectl_stores::googleplay::upload::{UploadArgs, upload};
 use releasectl_stores::meta::META_PROVIDERS;
-use releasectl_stores::{PROVIDERS, Reconciler};
+use releasectl_stores::{ExportOpts, PROVIDERS, Reconciler};
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -57,6 +57,42 @@ enum IapCmd {
     /// 設定した商品を販売停止にする。何も消さず、apply で販売に戻る。
     /// 販売停止の API が無いストア（App Store）は手作業を案内する
     Retire(Args),
+    /// 既にストアにある課金商品から iap.yaml を書き出す（読むだけ。ストアには何も書かない）
+    Init(IapInitArgs),
+}
+
+#[derive(clap::Args)]
+struct IapInitArgs {
+    /// App Store の bundle id
+    #[arg(long)]
+    bundle_id: Option<String>,
+    /// Google Play の package name
+    #[arg(long)]
+    package_name: Option<String>,
+    /// YAML の appName（省くと bundle id、無ければ package name）
+    #[arg(long)]
+    app_name: Option<String>,
+    /// 書き出す YAML
+    #[arg(short, long, default_value = "iap.yaml")]
+    out: PathBuf,
+    /// 実行する provider をカンマ区切りで絞る（appstore,googleplay）
+    #[arg(long, value_delimiter = ',')]
+    only: Vec<String>,
+    /// 基準にする App Store のテリトリ（ISO-3166 alpha-3）
+    #[arg(long, default_value = "USA")]
+    territory: String,
+    /// 基準にする Google Play のリージョン（ISO-3166 alpha-2）
+    #[arg(long, default_value = "US")]
+    region: String,
+    /// 基準の通貨（ISO-4217）
+    #[arg(long, default_value = "USD")]
+    currency: String,
+    /// 書き出す App Store のサブスクリプショングループ（省くとサブスクが一番多いグループ）
+    #[arg(long)]
+    subscription_group: Option<String>,
+    /// 既にある YAML に上書きする
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Subcommand)]
@@ -67,6 +103,36 @@ enum MetaCmd {
     Apply(MetaArgs),
     /// ストアの今の掲載情報を JSON で出す（読むだけ。Play は edit を開いて捨てる）
     Export(ExportArgs),
+    /// 既にストアにあるアプリから metadata.yaml（と画像）を書き出す（読むだけ。ストアには何も書かない）
+    Init(MetaInitArgs),
+}
+
+#[derive(clap::Args)]
+struct MetaInitArgs {
+    /// App Store の bundle id
+    #[arg(long)]
+    bundle_id: Option<String>,
+    /// Google Play の package name
+    #[arg(long)]
+    package_name: Option<String>,
+    /// YAML の appName（省くと bundle id、無ければ package name）
+    #[arg(long)]
+    app_name: Option<String>,
+    /// 書き出す YAML
+    #[arg(short, long, default_value = "metadata.yaml")]
+    out: PathBuf,
+    /// 実行する provider をカンマ区切りで絞る（appstore,googleplay）
+    #[arg(long, value_delimiter = ',')]
+    only: Vec<String>,
+    /// 読む App Store の版: "live"（販売中）か番号。省くと編集できる版、無ければ販売中の版
+    #[arg(long)]
+    app_store_version: Option<String>,
+    /// 画像をダウンロードしない（screenshots を書かない。画像は管理の外になる）
+    #[arg(long)]
+    no_images: bool,
+    /// 既にある YAML・画像のディレクトリに上書きする
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(clap::Args)]
@@ -172,11 +238,13 @@ fn main() -> ExitCode {
             IapCmd::Apply(a) => run(&a, Kind::Iap, Mode::Apply),
             IapCmd::RetirePlan(a) => run(&a, Kind::Iap, Mode::RetirePlan),
             IapCmd::Retire(a) => run(&a, Kind::Iap, Mode::Retire),
+            IapCmd::Init(a) => iap_init(&a),
         },
         Top::Meta { command } => match command {
             MetaCmd::Plan(a) => run_meta(&a, Mode::Plan),
             MetaCmd::Apply(a) => run_meta(&a, Mode::Apply),
             MetaCmd::Export(a) => meta_export(&a),
+            MetaCmd::Init(a) => meta_init(&a),
         },
         Top::Play { command } => match command {
             PlayCmd::UploadPlan(a) => play_upload(&a, false),
@@ -407,6 +475,313 @@ fn run_with(args: &Args, kind: Kind, mode: Mode, o: &MetaOverrides) -> ExitCode 
     ExitCode::from(exit_code(&all, had_fatal, args.detailed_exitcode))
 }
 
+/// provider ごとの export の結果をまとめたもの。
+struct Exported {
+    stores: Stores,
+    /// provider → 今の値
+    values: serde_json::Map<String, serde_json::Value>,
+    /// 読めなかった項目
+    errors: Vec<Action>,
+    /// 流さなかった provider（鍵が無いなど）
+    skipped: Vec<Action>,
+    app_store_version: Option<releasectl_core::AppStoreVersion>,
+    had_fatal: bool,
+}
+
+impl Exported {
+    fn has_error(&self) -> bool {
+        self.had_fatal || !self.errors.is_empty()
+    }
+}
+
+/// 選んだ provider から今の値を読む（`meta export` と `meta init` で共通）。
+fn collect_export(cfg: &MetaConfig, only: &[String], opts: &ExportOpts) -> Exported {
+    let selected: HashSet<&str> = only
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut x = Exported {
+        stores: config_stores(&cfg.bundle_id, &cfg.package_name),
+        values: serde_json::Map::new(),
+        errors: Vec::new(),
+        skipped: Vec::new(),
+        app_store_version: None,
+        had_fatal: false,
+    };
+    for (name, build) in META_PROVIDERS {
+        if !selected.is_empty() && !selected.contains(name) {
+            continue;
+        }
+        let mut report = Report::new(name);
+        match build(cfg) {
+            Err(reason) => report.add("provider", "", Status::Skip, reason),
+            Ok(rec) => match rec.export(opts, &mut report) {
+                Ok(v) if !v.is_null() => {
+                    x.values.insert(name.to_string(), v);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    x.had_fatal = true;
+                    report.add("provider", "", Status::Error, e);
+                }
+            },
+        }
+        if !report.store_ids.is_empty() {
+            x.stores.entry(name).or_default().extend(report.store_ids);
+        }
+        if report.app_store_version.is_some() {
+            x.app_store_version = report.app_store_version;
+        }
+        for a in report.actions {
+            match a.status {
+                Status::Error => x.errors.push(a),
+                Status::Skip => x.skipped.push(a),
+                _ => {}
+            }
+        }
+    }
+    x
+}
+
+/// `releasectl iap init`（docs: 02_cli-architecture/08-init.md）。ストアの今の課金カタログから iap.yaml を書き出す。
+fn iap_init(a: &IapInitArgs) -> ExitCode {
+    let fail = |m: String| {
+        eprintln!("error: {m}");
+        ExitCode::from(1)
+    };
+    let clean = |v: &Option<String>| v.as_deref().unwrap_or("").trim().to_string();
+    let (bundle_id, package_name) = (clean(&a.bundle_id), clean(&a.package_name));
+    if bundle_id.is_empty() && package_name.is_empty() {
+        return fail("pass --bundle-id and / or --package-name".into());
+    }
+    let mut app_name = clean(&a.app_name);
+    if app_name.is_empty() {
+        app_name = if bundle_id.is_empty() {
+            package_name.clone()
+        } else {
+            bundle_id.clone()
+        };
+    }
+    if a.out.exists() && !a.force {
+        return fail(format!(
+            "{} already exists (pass --force to overwrite)",
+            a.out.display()
+        ));
+    }
+    let cfg = Config {
+        app_name: app_name.clone(),
+        bundle_id,
+        package_name,
+        pricing: releasectl_core::config::Pricing {
+            territory: a.territory.trim().to_uppercase(),
+            region: a.region.trim().to_uppercase(),
+            currency: a.currency.trim().to_uppercase(),
+        },
+        ..Default::default()
+    };
+    let selected: HashSet<&str> = a
+        .only
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    println!("INIT — reading the stores for {app_name:?} (nothing is written to the stores)");
+    let mut values = serde_json::Map::new();
+    let mut failed = false;
+    for (name, build) in PROVIDERS {
+        if !selected.is_empty() && !selected.contains(name) {
+            continue;
+        }
+        // 指していないストアは流さない（Play は packageName が無いと致命的エラーにする）
+        let id = match *name {
+            "appstore" => &cfg.bundle_id,
+            _ => &cfg.package_name,
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let mut report = Report::new(name);
+        match build(&cfg) {
+            Err(reason) => println!("  skipped {name}: {reason}"),
+            Ok(rec) => match rec.export(&ExportOpts::default(), &mut report) {
+                Ok(v) if !v.is_null() => {
+                    values.insert(name.to_string(), v);
+                }
+                Ok(_) => {}
+                Err(e) => report.add("provider", "", Status::Error, e),
+            },
+        }
+        for x in report.actions.iter().filter(|x| x.status == Status::Error) {
+            eprintln!("{}", x.render());
+            failed = true;
+        }
+    }
+    // 読めなかったものを「無い」として YAML を書かない
+    if failed {
+        return fail("some values could not be read; nothing was written".into());
+    }
+    if values.is_empty() {
+        return fail("no store was read (check the keys in the environment and --only)".into());
+    }
+
+    let header = vec![
+        format!(
+            "Generated by `releasectl iap init` (releasectl {}) from the current store values.",
+            env!("CARGO_PKG_VERSION")
+        ),
+        "Prices are managed for the base territory / region below only.".to_string(),
+    ];
+    let out = releasectl_core::iap_init::iap_yaml(&releasectl_core::iap_init::IapInitInput {
+        app_name: &app_name,
+        header: &header,
+        pricing: &cfg.pricing,
+        subscription_group: &clean(&a.subscription_group),
+        appstore: values.get("appstore"),
+        googleplay: values.get("googleplay"),
+    });
+    let print_notes = || {
+        if !out.notes.is_empty() {
+            println!("\nnot expressed in the YAML — check these:");
+            for n in &out.notes {
+                println!("  - {n}");
+            }
+        }
+    };
+    if out.products == 0 {
+        print_notes();
+        return fail("no product can be written to iap.yaml; nothing was written".into());
+    }
+    // 書く前に、plan が読める YAML かを確かめる
+    if let Err(e) = Config::parse(&out.yaml, &a.out.display().to_string()) {
+        return fail(format!("the generated YAML is not valid: {e}"));
+    }
+    if let Err(e) = std::fs::write(&a.out, &out.yaml) {
+        return fail(format!("write {}: {e}", a.out.display()));
+    }
+    println!("\nwrote {} ({} products)", a.out.display(), out.products);
+    print_notes();
+    println!(
+        "\nnext: releasectl iap plan --config {} --detailed-exitcode (expect no changes)",
+        a.out.display()
+    );
+    ExitCode::SUCCESS
+}
+
+/// `releasectl meta init`（docs: 02_cli-architecture/08-init.md）。ストアの今の値から metadata.yaml と画像を書き出す。
+fn meta_init(a: &MetaInitArgs) -> ExitCode {
+    let fail = |m: String| {
+        eprintln!("error: {m}");
+        ExitCode::from(1)
+    };
+    let clean = |v: &Option<String>| v.as_deref().unwrap_or("").trim().to_string();
+    let (bundle_id, package_name) = (clean(&a.bundle_id), clean(&a.package_name));
+    if bundle_id.is_empty() && package_name.is_empty() {
+        return fail("pass --bundle-id and / or --package-name".into());
+    }
+    let mut app_name = clean(&a.app_name);
+    if app_name.is_empty() {
+        app_name = if bundle_id.is_empty() {
+            package_name.clone()
+        } else {
+            bundle_id.clone()
+        };
+    }
+    // 画像は YAML の隣の shots/ に置く
+    let base_dir = "shots";
+    let images = a
+        .out
+        .parent()
+        .unwrap_or(std::path::Path::new(""))
+        .join(base_dir);
+    let images_exist = std::fs::read_dir(&images).is_ok_and(|mut d| d.next().is_some());
+    if !a.force {
+        if a.out.exists() {
+            return fail(format!(
+                "{} already exists (pass --force to overwrite)",
+                a.out.display()
+            ));
+        }
+        if !a.no_images && images_exist {
+            return fail(format!(
+                "{} is not empty (pass --force to write into it, or --no-images)",
+                images.display()
+            ));
+        }
+    }
+
+    let cfg = MetaConfig {
+        app_name: app_name.clone(),
+        bundle_id,
+        package_name,
+        app_store_version: clean(&a.app_store_version),
+        ..Default::default()
+    };
+    let opts = ExportOpts {
+        images: (!a.no_images).then(|| images.clone()),
+        review: true,
+    };
+    println!("INIT — reading the stores for {app_name:?} (nothing is written to the stores)");
+    let x = collect_export(&cfg, &a.only, &opts);
+    for s in &x.skipped {
+        println!("  skipped {}: {}", s.provider, s.detail);
+    }
+    if x.has_error() {
+        for e in &x.errors {
+            eprintln!("{}", e.render());
+        }
+        // 読めなかったものを「無い」として YAML を書かない
+        if !images_exist {
+            let _ = std::fs::remove_dir_all(&images);
+        }
+        return fail("some values could not be read; nothing was written".into());
+    }
+    if x.values.is_empty() {
+        return fail("no store was read (check the keys in the environment and --only)".into());
+    }
+
+    let mut header = vec![format!(
+        "Generated by `releasectl meta init` (releasectl {}) from the current store values.",
+        env!("CARGO_PKG_VERSION")
+    )];
+    if let Some(v) = &x.app_store_version {
+        header.push(format!(
+            "App Store version: {} ({})",
+            v.version_string, v.state
+        ));
+    }
+    let out = releasectl_core::meta_init::meta_yaml(&releasectl_core::meta_init::MetaInitInput {
+        app_name: &app_name,
+        header: &header,
+        appstore: x.values.get("appstore"),
+        googleplay: x.values.get("googleplay"),
+        base_dir,
+    });
+    // 書く前に、plan が読める YAML かを確かめる
+    if let Err(e) = MetaConfig::parse(&out.yaml, &a.out.display().to_string()) {
+        return fail(format!("the generated YAML is not valid: {e}"));
+    }
+    if let Err(e) = std::fs::write(&a.out, &out.yaml) {
+        return fail(format!("write {}: {e}", a.out.display()));
+    }
+    println!("\nwrote {}", a.out.display());
+    if opts.images.is_some() && images.is_dir() {
+        println!("wrote images under {}", images.display());
+    }
+    if !out.notes.is_empty() {
+        println!("\nnot expressed in the YAML — check these:");
+        for n in &out.notes {
+            println!("  - {n}");
+        }
+    }
+    println!(
+        "\nnext: releasectl meta plan --config {} --detailed-exitcode (expect no changes)",
+        a.out.display()
+    );
+    ExitCode::SUCCESS
+}
+
 /// `releasectl meta export`（docs: 02_cli-architecture/07-export.md）。標準出力に JSON を 1 つだけ出す。
 fn meta_export(a: &ExportArgs) -> ExitCode {
     let path = a
@@ -423,53 +798,17 @@ fn meta_export(a: &ExportArgs) -> ExitCode {
     if let Some(v) = &a.app_store_version {
         cfg.app_store_version = v.trim().to_string();
     }
-    let selected: HashSet<&str> = a
-        .only
-        .iter()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let x = collect_export(&cfg, &a.only, &ExportOpts::default());
+    let has_error = x.has_error();
+    let Exported {
+        stores,
+        values,
+        errors,
+        skipped,
+        app_store_version,
+        ..
+    } = x;
 
-    let mut stores = config_stores(&cfg.bundle_id, &cfg.package_name);
-    let mut values = serde_json::Map::new();
-    let mut errors: Vec<Action> = Vec::new();
-    let mut skipped: Vec<Action> = Vec::new();
-    let mut app_store_version = None;
-    let mut had_fatal = false;
-    for (name, build) in META_PROVIDERS {
-        if !selected.is_empty() && !selected.contains(name) {
-            continue;
-        }
-        let mut report = Report::new(name);
-        match build(&cfg) {
-            Err(reason) => report.add("provider", "", Status::Skip, reason),
-            Ok(rec) => match rec.export(&mut report) {
-                Ok(v) if !v.is_null() => {
-                    values.insert(name.to_string(), v);
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    had_fatal = true;
-                    report.add("provider", "", Status::Error, e);
-                }
-            },
-        }
-        if !report.store_ids.is_empty() {
-            stores.entry(name).or_default().extend(report.store_ids);
-        }
-        if report.app_store_version.is_some() {
-            app_store_version = report.app_store_version;
-        }
-        for x in report.actions {
-            match x.status {
-                Status::Error => errors.push(x),
-                Status::Skip => skipped.push(x),
-                _ => {}
-            }
-        }
-    }
-
-    let has_error = had_fatal || !errors.is_empty();
     let mut doc = serde_json::json!({
         "version": JSON_VERSION,
         "command": "meta-export",

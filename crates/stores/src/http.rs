@@ -191,6 +191,27 @@ impl Client {
     }
 }
 
+/// 公開の URL（ストアの画像の CDN）を Authorization なしで取る。通信エラーと 5xx は 3 回まで再試行する。
+pub fn download(url: &str) -> Result<Vec<u8>, String> {
+    let http = http_client_with_timeout(Duration::from_secs(120));
+    let mut attempt = 0;
+    loop {
+        let retry = match http.get(url).send() {
+            Ok(resp) if resp.status().is_success() => {
+                return resp.bytes().map(|b| b.to_vec()).map_err(|e| e.to_string());
+            }
+            Ok(resp) if resp.status().is_server_error() => format!("HTTP {}", resp.status()),
+            Ok(resp) => return Err(format!("download {url}: HTTP {}", resp.status())),
+            Err(e) => e.to_string(),
+        };
+        if attempt >= 3 {
+            return Err(format!("download {url}: {retry}"));
+        }
+        std::thread::sleep(Duration::from_secs(1 << attempt));
+        attempt += 1;
+    }
+}
+
 fn retry_after(h: &str) -> Duration {
     match h.trim().parse::<u64>() {
         Ok(secs) if secs > 0 => Duration::from_secs(secs),

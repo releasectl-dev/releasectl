@@ -8,6 +8,7 @@
 //! できる base plan を有効化する。作る前に productId で突合する（重複は 409）。
 
 mod auth;
+mod export;
 mod retire;
 pub mod upload;
 
@@ -218,6 +219,10 @@ fn q(s: &str) -> String {
 impl Reconciler for Play {
     fn name(&self) -> &'static str {
         "googleplay"
+    }
+
+    fn export(&self, _opts: &crate::ExportOpts, r: &mut Report) -> Result<Value, String> {
+        self.export_catalog(r)
     }
 
     fn retire(&self, apply: bool, r: &mut Report) -> Result<(), String> {
